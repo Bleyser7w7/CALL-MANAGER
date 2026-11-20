@@ -39,7 +39,7 @@ Los gráficos presentan conteos por estado y métricas calculadas sobre los caso
 
 ## Configuración
 
-1. En Supabase, abre **SQL Editor** y ejecuta, en este orden, `database/schema.sql`, `database/policies.sql` y `database/seed.sql`. Al actualizar una instalación existente, vuelve a ejecutar los dos primeros archivos para habilitar el rol Calidad y el registro de sesiones.
+1. En Supabase, abre **SQL Editor** y ejecuta, en este orden, `database/schema.sql`, `database/policies.sql` y `database/seed.sql`. Al actualizar una instalación existente, vuelve a ejecutar los dos primeros archivos para habilitar el rol Calidad y el registro de sesiones. Si PostgREST aún indica que no encuentra `public.user_sessions`, ejecuta `NOTIFY pgrst, 'reload schema';` y vuelve a cargar la aplicación.
 2. En `js/config.js`, reemplaza `url` y `anonKey` por la URL del proyecto y la clave pública `anon`/publishable. Esta clave es pública por diseño; RLS es la barrera de seguridad. No pegues la `service_role` en ningún archivo del navegador.
 3. En **Authentication → URL Configuration**, configura el dominio de despliegue y su URL de redirección. En producción, desactiva el registro público (`Allow new users to sign up`); las cuentas se crean desde la interfaz de administración.
 4. Instala/inicia sesión con Supabase CLI y enlaza el proyecto:

@@ -276,10 +276,14 @@ async function teamView() {
     return `<tr><td><strong>${escapeHtml(user.full_name)}</strong></td><td>${escapeHtml(user.username)}</td><td>${escapeHtml(user.email)}</td>
       <td>${escapeHtml(user.role_label || user.role)}</td><td><span class="pill ${user.role === "quality" ? "blue" : user.available_now ? "green" : "yellow"}">${status}</span></td></tr>`;
   }).join("");
-  const { data: sessions, error } = await client.from("user_sessions")
+  const { data: sessions, error: sessionsError } = await client.from("user_sessions")
     .select("id,user_id,started_at,last_seen_at,ended_at,end_reason")
     .order("started_at", { ascending: false }).limit(100);
-  if (error) throw error;
+  const sessionWarning = sessionsError
+    ? `<p class="notice error">No se pudo cargar el registro de sesiones: ${escapeHtml(sessionsError.message)}${sessionsError.code === "PGRST205"
+      ? " Aplica database/schema.sql y database/policies.sql en Supabase; si la tabla ya existe, recarga la caché del esquema."
+      : ""}</p>`
+    : "";
   const usersById = new Map(users.map(user => [user.id, user]));
   const sessionRows = (sessions || []).map(session => {
     const user = usersById.get(session.user_id);
@@ -302,8 +306,9 @@ async function teamView() {
     <article class="panel table-wrap"><table class="data-table"><thead><tr><th>Nombre</th><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="5" class="empty-state">No hay usuarios registrados.</td></tr>'}</tbody></table></article>
     <div class="section-heading"><h2>Tiempo de sesión por usuario</h2><span class="subtle">Últimas 100 sesiones; las pestañas sin cierre muestran su última actividad.</span></div>
+    ${sessionWarning}
     <article class="panel table-wrap"><table class="data-table"><thead><tr><th>Usuario</th><th>Inicio</th><th>Fin / actividad</th><th>Duración</th><th>Estado</th></tr></thead>
-      <tbody>${sessionRows || '<tr><td colspan="5" class="empty-state">Aún no hay sesiones registradas.</td></tr>'}</tbody></table></article></section>`;
+      <tbody>${sessionRows || `<tr><td colspan="5" class="empty-state">${sessionsError ? "Registro de sesiones no disponible." : "Aún no hay sesiones registradas."}</td></tr>`}</tbody></table></article></section>`;
 }
 
 async function historyView() {
