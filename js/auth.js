@@ -7,7 +7,17 @@ const message = document.querySelector("#auth-message");
 const setupNote = document.querySelector(".setup-note");
 const forgotButton = document.querySelector("#forgot-password");
 const backToLoginButton = document.querySelector("#back-to-login");
+const passwordToggle = document.querySelector("#toggle-password");
+const loginPassword = form?.querySelector('input[name="password"]');
 let isPasswordRecovery = false;
+
+passwordToggle?.addEventListener("click", () => {
+  const isVisible = loginPassword?.type === "password";
+  if (!loginPassword) return;
+  loginPassword.type = isVisible ? "text" : "password";
+  passwordToggle.setAttribute("aria-label", isVisible ? "Ocultar contraseña" : "Mostrar contraseña");
+  passwordToggle.setAttribute("aria-pressed", String(isVisible));
+});
 
 function showMessage(text, kind = "") {
   if (!message) return;

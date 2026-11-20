@@ -23,6 +23,7 @@ GitHub Pages está publicado. Para usar la dirección gratuita de GitHub Pages e
 - Reportes filtrables, descarga CSV e impresión del navegador para guardar como PDF.
 - Creación de usuarios por una Edge Function protegida; nunca requiere la clave de servicio en el navegador.
 - Importación masiva de usuarios para administradores desde archivos `.xlsx`, `.xls` o `.csv`, con validación por fila y resultados de altas. La primera hoja requiere las columnas `nombre`, `usuario`, `correo` y `contraseña`; `rol` es opcional, acepta `agent`, `quality`, `supervisor` o `admin` y, si falta o queda vacío, se interpreta como `agent`. En **Equipo → Importar desde Excel** se puede descargar una plantilla.
+- La dirección antigua `dashboard.html` redirige al panel actual `admin.html`; si se conserva un enlace de versiones anteriores, la importación queda disponible en **Equipo → Importar desde Excel**.
 
 Las contraseñas del archivo se procesan en el navegador y se envían a la Edge Function protegida de Supabase mediante HTTPS; no se incluyen en el informe de resultados. Usa contraseñas temporales, protege el archivo y elimínalo cuando termine la carga. Las filas válidas se crean individualmente: los errores de una fila no cancelan las demás.
 
