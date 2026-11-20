@@ -144,6 +144,30 @@ create unique index if not exists notifications_deduplicate_idx
   on public.notifications(user_id, callback_id, notification_type, scheduled_at);
 create index if not exists notifications_user_created_idx on public.notifications(user_id, created_at desc);
 
+create table if not exists public.agent_activity_events (
+  id uuid primary key default gen_random_uuid(),
+  agent_id uuid not null references public.agents(id) on delete cascade,
+  status text not null check (status in ('available', 'break', 'pause', 'bathroom', 'training', 'feedback')),
+  shift_started_at timestamptz not null,
+  shift_ends_at timestamptz not null,
+  started_at timestamptz not null,
+  ended_at timestamptz,
+  check (shift_ends_at > shift_started_at),
+  check (started_at >= shift_started_at and started_at < shift_ends_at),
+  check (ended_at is null or (ended_at >= started_at and ended_at <= shift_ends_at))
+);
+create unique index if not exists agent_activity_one_open_idx
+  on public.agent_activity_events(agent_id) where ended_at is null;
+create index if not exists agent_activity_shift_idx
+  on public.agent_activity_events(agent_id, shift_started_at, started_at);
+
+create table if not exists public.agent_break_alerts (
+  agent_id uuid not null references public.agents(id) on delete cascade,
+  shift_started_at timestamptz not null,
+  alerted_at timestamptz not null default now(),
+  primary key (agent_id, shift_started_at)
+);
+
 create table if not exists public.activity_logs (
   id uuid primary key default gen_random_uuid(),
   callback_id uuid references public.callbacks(id) on delete set null,
@@ -164,6 +188,225 @@ create table if not exists public.system_settings (
 create or replace function public.current_user_role()
 returns text language sql stable security definer set search_path = public
 as $$ select role from public.profiles where id = auth.uid() $$;
+
+create or replace function public.agent_shift_window(p_agent_id uuid, p_at timestamptz default now())
+returns table(shift_started_at timestamptz, shift_ends_at timestamptz)
+language sql stable security definer set search_path = public
+as $$
+  select (((p_at at time zone 'America/Lima')::date + s.start_time) at time zone 'America/Lima'),
+         (((p_at at time zone 'America/Lima')::date + s.end_time) at time zone 'America/Lima')
+  from public.agent_schedules s
+  where s.agent_id = p_agent_id
+    and s.weekday = extract(dow from (p_at at time zone 'America/Lima'))::smallint
+    and s.is_working
+    and (p_at at time zone 'America/Lima')::time >= s.start_time
+    and (p_at at time zone 'America/Lima')::time < s.end_time;
+$$;
+
+create or replace function public.notify_agent_break_limit(
+  p_agent_id uuid,
+  p_shift_started_at timestamptz,
+  p_break_seconds bigint
+)
+returns boolean language plpgsql security definer set search_path = public
+as $$
+declare
+  v_agent_name text;
+begin
+  if p_break_seconds <= 3600 then return false; end if;
+  insert into public.agent_break_alerts(agent_id, shift_started_at)
+  values (p_agent_id, p_shift_started_at)
+  on conflict do nothing;
+  if not found then return false; end if;
+
+  select full_name into v_agent_name from public.profiles where id = p_agent_id;
+  insert into public.notifications(user_id, notification_type, title, message, scheduled_at)
+  select p.id, 'agent_break_over_limit', 'Break excedido',
+    coalesce(v_agent_name, 'Un agente') || ' superó 60 minutos de Break en su turno. Total: '
+      || ceil(p_break_seconds / 60.0)::text || ' min.',
+    p_shift_started_at
+  from public.profiles p where p.role in ('admin', 'supervisor');
+  return true;
+end;
+$$;
+
+create or replace function public.get_agent_activity_status()
+returns jsonb language plpgsql security definer set search_path = public
+as $$
+declare
+  v_agent_id uuid := auth.uid();
+  v_shift record;
+  v_status text;
+  v_status_since timestamptz;
+  v_break_seconds bigint := 0;
+begin
+  if v_agent_id is null or public.current_user_role() is distinct from 'agent' then
+    raise exception 'Solo un agente autenticado puede consultar su estado.';
+  end if;
+
+  update public.agent_activity_events
+  set ended_at = shift_ends_at
+  where agent_id = v_agent_id and ended_at is null and shift_ends_at <= now();
+
+  select * into v_shift from public.agent_shift_window(v_agent_id, now());
+  if not found then
+    return jsonb_build_object('on_shift', false, 'status', 'off_shift',
+      'break_seconds', 0, 'over_limit', false);
+  end if;
+
+  update public.agent_activity_events
+  set ended_at = greatest(started_at, least(now(), shift_ends_at))
+  where agent_id = v_agent_id and ended_at is null
+    and shift_started_at <> v_shift.shift_started_at;
+
+  insert into public.agent_activity_events(
+    agent_id, status, shift_started_at, shift_ends_at, started_at
+  ) values (v_agent_id, 'available', v_shift.shift_started_at, v_shift.shift_ends_at, now())
+  on conflict (agent_id) where ended_at is null do nothing;
+
+  select status, started_at into v_status, v_status_since
+  from public.agent_activity_events
+  where agent_id = v_agent_id and shift_started_at = v_shift.shift_started_at and ended_at is null
+  for update;
+
+  select floor(coalesce(sum(extract(epoch from (
+    least(coalesce(ended_at, now()), shift_ends_at) - started_at
+  ))), 0))::bigint into v_break_seconds
+  from public.agent_activity_events
+  where agent_id = v_agent_id and shift_started_at = v_shift.shift_started_at and status = 'break';
+
+  perform public.notify_agent_break_limit(v_agent_id, v_shift.shift_started_at, v_break_seconds);
+  return jsonb_build_object(
+    'on_shift', true,
+    'status', v_status,
+    'status_since', v_status_since,
+    'shift_started_at', v_shift.shift_started_at,
+    'shift_ends_at', v_shift.shift_ends_at,
+    'break_seconds', v_break_seconds,
+    'over_limit', v_break_seconds > 3600
+  );
+end;
+$$;
+
+create or replace function public.set_agent_activity_status(p_status text)
+returns jsonb language plpgsql security definer set search_path = public
+as $$
+declare
+  v_agent_id uuid := auth.uid();
+  v_current jsonb;
+  v_shift_started_at timestamptz;
+begin
+  if p_status is null or p_status not in ('available', 'break', 'pause', 'bathroom', 'training', 'feedback') then
+    raise exception 'El estado seleccionado no es válido.';
+  end if;
+  if v_agent_id is null or public.current_user_role() is distinct from 'agent' then
+    raise exception 'Solo un agente autenticado puede cambiar su estado.';
+  end if;
+
+  v_current := public.get_agent_activity_status();
+  if not coalesce((v_current->>'on_shift')::boolean, false) then
+    raise exception 'Solo puedes cambiar tu estado durante tu turno programado.';
+  end if;
+  if v_current->>'status' = p_status then return v_current; end if;
+
+  v_shift_started_at := (v_current->>'shift_started_at')::timestamptz;
+  update public.agent_activity_events
+  set ended_at = now()
+  where agent_id = v_agent_id and shift_started_at = v_shift_started_at and ended_at is null;
+
+  insert into public.agent_activity_events(
+    agent_id, status, shift_started_at, shift_ends_at, started_at
+  ) values (
+    v_agent_id, p_status, v_shift_started_at,
+    (v_current->>'shift_ends_at')::timestamptz, now()
+  );
+  return public.get_agent_activity_status();
+end;
+$$;
+
+create or replace function public.process_agent_break_alerts()
+returns integer language plpgsql security definer set search_path = public
+as $$
+declare
+  v_break record;
+  v_count integer := 0;
+begin
+  update public.agent_activity_events
+  set ended_at = shift_ends_at
+  where ended_at is null and shift_ends_at <= now();
+
+  for v_break in
+    select agent_id, shift_started_at,
+      floor(sum(extract(epoch from (coalesce(ended_at, now()) - started_at))))::bigint as break_seconds
+    from public.agent_activity_events
+    where status = 'break'
+    group by agent_id, shift_started_at
+    having sum(extract(epoch from (coalesce(ended_at, now()) - started_at))) > 3600
+  loop
+    if public.notify_agent_break_limit(v_break.agent_id, v_break.shift_started_at, v_break.break_seconds) then
+      v_count := v_count + 1;
+    end if;
+  end loop;
+  return v_count;
+end;
+$$;
+
+create or replace function public.agent_activity_report(
+  p_from date default null,
+  p_to date default null,
+  p_agent_id uuid default null
+)
+returns table(
+  agent_id uuid,
+  full_name text,
+  shift_started_at timestamptz,
+  shift_ends_at timestamptz,
+  available_seconds bigint,
+  break_seconds bigint,
+  pause_seconds bigint,
+  bathroom_seconds bigint,
+  training_seconds bigint,
+  feedback_seconds bigint,
+  current_status text
+)
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  v_role text := public.current_user_role();
+  v_from date;
+  v_to date;
+begin
+  if v_role is null or v_role not in ('admin', 'supervisor', 'quality') then
+    raise exception 'Solo administración, supervisión y Calidad pueden consultar el reporte de actividad.';
+  end if;
+  v_from := coalesce(p_from, p_to, (now() at time zone 'America/Lima')::date);
+  v_to := coalesce(p_to, p_from, v_from);
+  if v_to < v_from then raise exception 'El rango de fechas no es válido.'; end if;
+
+  return query
+  select e.agent_id, p.full_name, e.shift_started_at, e.shift_ends_at,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(e.ended_at, now()), e.shift_ends_at) - e.started_at)))
+      filter (where e.status = 'available'), 0))::bigint,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(e.ended_at, now()), e.shift_ends_at) - e.started_at)))
+      filter (where e.status = 'break'), 0))::bigint,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(e.ended_at, now()), e.shift_ends_at) - e.started_at)))
+      filter (where e.status = 'pause'), 0))::bigint,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(e.ended_at, now()), e.shift_ends_at) - e.started_at)))
+      filter (where e.status = 'bathroom'), 0))::bigint,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(e.ended_at, now()), e.shift_ends_at) - e.started_at)))
+      filter (where e.status = 'training'), 0))::bigint,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(e.ended_at, now()), e.shift_ends_at) - e.started_at)))
+      filter (where e.status = 'feedback'), 0))::bigint,
+    coalesce(max(e.status) filter (where e.ended_at is null), 'off_shift')
+  from public.agent_activity_events e
+  join public.agents a on a.id = e.agent_id
+  join public.profiles p on p.id = e.agent_id
+  where (e.shift_started_at at time zone 'America/Lima')::date between v_from and v_to
+    and (p_agent_id is null or e.agent_id = p_agent_id)
+  group by e.agent_id, p.full_name, e.shift_started_at, e.shift_ends_at
+  order by e.shift_started_at desc, p.full_name;
+end;
+$$;
 
 create or replace function public.handle_new_auth_user()
 returns trigger language plpgsql security definer set search_path = public
@@ -229,7 +472,7 @@ declare
   v_weekday integer := extract(dow from now() at time zone 'America/Lima')::integer;
   v_time time := (now() at time zone 'America/Lima')::time;
 begin
-  if public.current_user_role() not in ('admin', 'supervisor') then
+  if coalesce(public.current_user_role(), '') not in ('admin', 'supervisor') then
     raise exception 'No tienes permisos para asignar casos.';
   end if;
   select * into v_callback from public.callbacks where id = p_callback_id for update;
@@ -244,6 +487,12 @@ begin
     join public.agent_schedules s on s.agent_id = a.id and s.weekday = v_weekday and s.is_working
     where a.id = p_agent_id and a.is_available
       and v_time >= s.start_time and v_time < s.end_time
+      and exists (
+        select 1 from public.agent_activity_events e
+        where e.agent_id = a.id and e.ended_at is null and e.status = 'available'
+          and e.shift_started_at = (((now() at time zone 'America/Lima')::date + s.start_time) at time zone 'America/Lima')
+          and e.shift_ends_at > now()
+      )
       and not exists (
         select 1 from public.agent_breaks b
         where b.agent_id = a.id and b.weekday = v_weekday
@@ -256,6 +505,12 @@ begin
     join public.agent_schedules s on s.agent_id = a.id and s.weekday = v_weekday and s.is_working
     where a.is_available
       and v_time >= s.start_time and v_time < s.end_time
+      and exists (
+        select 1 from public.agent_activity_events e
+        where e.agent_id = a.id and e.ended_at is null and e.status = 'available'
+          and e.shift_started_at = (((now() at time zone 'America/Lima')::date + s.start_time) at time zone 'America/Lima')
+          and e.shift_ends_at > now()
+      )
       and not exists (
         select 1 from public.agent_breaks b
         where b.agent_id = a.id and b.weekday = v_weekday
@@ -369,6 +624,7 @@ declare
   v_second_minutes integer := 5;
   v_overdue_minutes integer := 10;
 begin
+  v_count := public.process_agent_break_alerts();
   select coalesce((value->>'first_minutes')::integer, 10),
          coalesce((value->>'second_minutes')::integer, 5),
          coalesce((value->>'overdue_minutes')::integer, 10)
@@ -522,4 +778,6 @@ alter table public.notifications enable row level security;
 alter table public.activity_logs enable row level security;
 alter table public.system_settings enable row level security;
 alter table public.user_sessions enable row level security;
+alter table public.agent_activity_events enable row level security;
+alter table public.agent_break_alerts enable row level security;
 

@@ -96,11 +96,21 @@ drop policy if exists "user sessions read by scope" on public.user_sessions;
 create policy "user sessions read by scope" on public.user_sessions for select to authenticated
   using (user_id = auth.uid() or public.current_user_role() in ('admin', 'supervisor'));
 
+drop policy if exists "agent activity read by scope" on public.agent_activity_events;
+create policy "agent activity read by scope" on public.agent_activity_events for select to authenticated
+  using (agent_id = auth.uid() or public.current_user_role() in ('admin', 'supervisor', 'quality'));
+
 revoke all on function public.assign_callback(uuid, uuid) from public, anon;
 revoke all on function public.start_callback(uuid) from public, anon;
 revoke all on function public.finish_callback(uuid, text, text, timestamptz) from public, anon;
 revoke all on function public.close_callback(uuid, text) from public, anon;
 revoke all on function public.process_callback_alerts() from public, anon, authenticated;
+revoke all on function public.agent_shift_window(uuid, timestamptz) from public, anon, authenticated;
+revoke all on function public.notify_agent_break_limit(uuid, timestamptz, bigint) from public, anon, authenticated;
+revoke all on function public.get_agent_activity_status() from public, anon;
+revoke all on function public.set_agent_activity_status(text) from public, anon;
+revoke all on function public.process_agent_break_alerts() from public, anon, authenticated;
+revoke all on function public.agent_activity_report(date, date, uuid) from public, anon;
 revoke all on function public.start_user_session(uuid) from public, anon;
 revoke all on function public.heartbeat_user_session(uuid) from public, anon;
 revoke all on function public.end_user_session(uuid, text) from public, anon;
@@ -109,6 +119,9 @@ grant execute on function public.start_callback(uuid) to authenticated;
 grant execute on function public.finish_callback(uuid, text, text, timestamptz) to authenticated;
 grant execute on function public.close_callback(uuid, text) to authenticated;
 grant execute on function public.process_callback_alerts() to service_role;
+grant execute on function public.get_agent_activity_status() to authenticated;
+grant execute on function public.set_agent_activity_status(text) to authenticated;
+grant execute on function public.agent_activity_report(date, date, uuid) to authenticated;
 grant execute on function public.start_user_session(uuid) to authenticated;
 grant execute on function public.heartbeat_user_session(uuid) to authenticated;
 grant execute on function public.end_user_session(uuid, text) to authenticated;
@@ -118,13 +131,13 @@ grant execute on function public.current_user_role() to authenticated, service_r
 revoke all on public.profiles, public.agents, public.supervisors, public.callbacks,
   public.callback_assignments, public.callback_attempts, public.agent_schedules,
   public.agent_breaks, public.notifications, public.activity_logs, public.system_settings,
-  public.user_sessions
+  public.user_sessions, public.agent_activity_events, public.agent_break_alerts
   from anon, authenticated;
 
 grant select on public.profiles, public.agents, public.supervisors, public.callbacks,
   public.callback_assignments, public.callback_attempts, public.agent_schedules,
   public.agent_breaks, public.notifications, public.activity_logs, public.system_settings,
-  public.user_sessions
+  public.user_sessions, public.agent_activity_events
   to authenticated;
 grant update on public.profiles, public.agents, public.supervisors, public.callbacks,
   public.agent_schedules, public.agent_breaks, public.system_settings to authenticated;
@@ -136,7 +149,7 @@ grant delete on public.agents, public.supervisors, public.callbacks,
 grant all on public.profiles, public.agents, public.supervisors, public.callbacks,
   public.callback_assignments, public.callback_attempts, public.agent_schedules,
   public.agent_breaks, public.notifications, public.activity_logs, public.system_settings,
-  public.user_sessions
+  public.user_sessions, public.agent_activity_events, public.agent_break_alerts
   to service_role;
 
 do $$
@@ -148,5 +161,9 @@ begin
   if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime'
     and schemaname = 'public' and tablename = 'callbacks') then
     alter publication supabase_realtime add table public.callbacks;
+  end if;
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime'
+    and schemaname = 'public' and tablename = 'agent_activity_events') then
+    alter publication supabase_realtime add table public.agent_activity_events;
   end if;
 end $$;

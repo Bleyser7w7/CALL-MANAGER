@@ -34,6 +34,14 @@ export async function renderOverview(profile, filters = {}) {
   }, {});
   const completed = statuses.completed || 0;
   const completionRate = callbacks.length ? Math.round(completed / callbacks.length * 100) : 0;
+  const activityLabels = {
+    available: "Disponible", break: "Break", pause: "Pausa", bathroom: "Baño",
+    training: "Capacitación", feedback: "Feedback"
+  };
+  const agentAvailabilityLabel = availability?.activity_status === "available"
+    ? availability.available_now ? "Disponible" : availability.on_break ? "En pausa" : "No disponible"
+    : activityLabels[availability?.activity_status] || (availability?.on_break ? "En pausa"
+      : availability?.on_shift ? "No disponible" : "Fuera de turno");
   const stats = [
     ["Total de casos", callbacks.length, "En el periodo seleccionado"],
     ["Pendientes", (statuses.pending || 0) + (statuses.queued || 0) + (statuses.assigned || 0), "Requieren seguimiento"],
@@ -72,7 +80,7 @@ export async function renderOverview(profile, filters = {}) {
         <div class="setting-row"><span class="muted">Reprogramados</span><strong>${statuses.rescheduled || 0}</strong></div>
         <div class="setting-row"><span class="muted">Incumplidos</span><strong>${statuses.unfulfilled || 0}</strong></div>
         ${profile.role === "agent" ? `<div class="setting-row"><span class="muted">Disponibilidad</span>
-          <strong>${availability?.available_now ? "Disponible" : availability?.on_break ? "En pausa" : availability?.on_shift ? "No disponible" : "Fuera de turno"}</strong></div>
+          <strong>${agentAvailabilityLabel}</strong></div>
           <div class="setting-row"><span class="muted">Próximo descanso</span><strong>${nextBreak ? `${nextBreak.start_time.slice(0, 5)} · ${escapeHtml(nextBreak.label)}` : "No programado"}</strong></div>` : ""}
       </article></div>
     <div class="section-heading"><h2>Próximos casos</h2><button class="button button-small" data-view="callbacks">Ver todos</button></div>

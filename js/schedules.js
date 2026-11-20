@@ -50,6 +50,9 @@ export async function fetchAgentAvailability(agentIds) {
   const { data: breaks, error: breaksError } = await client.from("agent_breaks")
     .select("agent_id,weekday,start_time,end_time").in("agent_id", agentIds);
   if (breaksError) throw breaksError;
+  const { data: activity, error: activityError } = await client.from("agent_activity_events")
+    .select("agent_id,status,shift_ends_at").in("agent_id", agentIds).is("ended_at", null);
+  if (activityError && activityError.code !== "PGRST205") throw activityError;
   const nowParts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Lima", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
   }).formatToParts(new Date()).reduce((parts, item) => ({ ...parts, [item.type]: item.value }), {});
@@ -65,7 +68,15 @@ export async function fetchAgentAvailability(agentIds) {
     const onShift = Boolean(shift?.is_working && minute >= toMinutes(shift.start_time) && minute < toMinutes(shift.end_time));
     const onBreak = (breaks || []).some(item => item.agent_id === agentId && item.weekday === weekday &&
       minute >= toMinutes(item.start_time) && minute < toMinutes(item.end_time));
-    output.set(agentId, { on_shift: onShift, on_break: onBreak, available_now: onShift && !onBreak });
+    const activeStatus = onShift && (activity || []).find(item => item.agent_id === agentId
+      && Date.parse(item.shift_ends_at) > Date.now());
+    const activityUnavailable = !activityError && (!activeStatus || activeStatus.status !== "available");
+    output.set(agentId, {
+      on_shift: onShift,
+      on_break: onBreak,
+      activity_status: activeStatus?.status || null,
+      available_now: onShift && !onBreak && !activityUnavailable
+    });
   }
   return output;
 }

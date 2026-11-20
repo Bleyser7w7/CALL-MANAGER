@@ -3,7 +3,7 @@ import { createCallback, fetchCallbacks, finishCall, startCall, assignCallback, 
 import { fetchAgents } from "./assignments.js";
 import { getSchedules, saveBreak, saveSchedule } from "./schedules.js";
 import { fetchNotifications, markNotificationRead, notifyDesktop, subscribeNotifications } from "./notifications.js";
-import { exportCsv } from "./reports.js";
+import { exportAgentActivityCsv, exportCsv } from "./reports.js";
 import { renderOverview } from "./dashboard.js";
 
 const root = document.querySelector("#app");
@@ -26,8 +26,22 @@ let xlsxModulePromise;
 let activeSessionKey = "";
 let sessionHeartbeatTimer;
 let sessionTrackingWarningShown = false;
+let agentActivityStatus = null;
+let agentActivityLoading = true;
+let agentActivityBusy = false;
+let agentActivityError = "";
+let agentActivityFetchedAt = 0;
+let agentActivityTimer;
+let agentActivityRefreshTimer;
+let agentActivityReportRows = [];
 
 const SESSION_STORAGE_KEY = "callback-manager-session-id";
+const AGENT_BREAK_LIMIT_SECONDS = 60 * 60;
+const AGENT_ACTIVITY_STATUSES = [
+  ["available", "Disponible"], ["break", "Break"], ["pause", "Pausa"],
+  ["bathroom", "Baño"], ["training", "Capacitación"], ["feedback", "Feedback"]
+];
+const AGENT_ACTIVITY_LABELS = Object.fromEntries(AGENT_ACTIVITY_STATUSES);
 
 function toast(message, type = "success") {
   const node = document.createElement("div");
@@ -108,6 +122,110 @@ function formatSessionDuration(milliseconds) {
   return days ? `${days} d ${hours} h ${remainingMinutes} min` : `${hours} h ${remainingMinutes} min`;
 }
 
+function formatActivityDuration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor(total % 3600 / 60);
+  const remainingSeconds = total % 60;
+  return `${hours} h ${minutes} min ${remainingSeconds} s`;
+}
+
+function isValidAgentActivityStatus(data) {
+  return data && typeof data.on_shift === "boolean"
+    && (data.status === "off_shift" || Object.hasOwn(AGENT_ACTIVITY_LABELS, data.status))
+    && Number.isFinite(Number(data.break_seconds));
+}
+
+function renderAgentActivityPanel() {
+  if (profile.role !== "agent") return "";
+  return `<section id="agent-activity-panel" class="panel agent-activity-panel">
+    <div class="agent-activity-heading"><div><h2>Estado y tiempos</h2>
+      <p class="subtle">El tiempo de Break se acumula durante el turno. Límite: 1 hora.</p></div>
+      <span id="agent-activity-current-status" class="pill gray">Consultando…</span></div>
+    <div class="agent-activity-counter"><span>Break utilizado</span>
+      <strong id="agent-activity-break-time">0 h 0 min 0 s</strong><span>/ 1 h 0 min 0 s</span></div>
+    <div class="agent-activity-actions">${AGENT_ACTIVITY_STATUSES.map(([value, label]) =>
+      `<button class="button button-small" data-action="set-agent-status" data-status="${value}" aria-pressed="false" disabled>${label}</button>`).join("")}</div>
+    <p id="agent-activity-message" class="notice" role="status"></p>
+  </section>`;
+}
+
+function refreshAgentActivityDisplay() {
+  const panel = document.querySelector("#agent-activity-panel");
+  if (!panel) return;
+  const data = agentActivityStatus;
+  const status = data?.status || "off_shift";
+  const breakSeconds = Number(data?.break_seconds) || 0;
+  const elapsedBreakSeconds = status === "break" ? Math.max(0, (Date.now() - agentActivityFetchedAt) / 1000) : 0;
+  const usedSeconds = Math.floor(breakSeconds + elapsedBreakSeconds);
+  const overLimit = usedSeconds > AGENT_BREAK_LIMIT_SECONDS;
+  const statusPill = panel.querySelector("#agent-activity-current-status");
+  const timeDisplay = panel.querySelector("#agent-activity-break-time");
+  const message = panel.querySelector("#agent-activity-message");
+  panel.classList.toggle("over-limit", overLimit);
+  statusPill.textContent = agentActivityLoading ? "Consultando…" : AGENT_ACTIVITY_LABELS[status] || "Fuera de turno";
+  statusPill.className = `pill ${overLimit ? "red" : status === "available" ? "green" : status === "off_shift" ? "gray" : "yellow"}`;
+  timeDisplay.textContent = formatActivityDuration(usedSeconds);
+  message.className = `notice${agentActivityError || overLimit ? " error" : ""}`;
+  message.textContent = agentActivityError
+    ? `No se pudo cargar el control de estados: ${agentActivityError}. Aplica database/schema.sql y database/policies.sql.`
+    : agentActivityLoading ? "Consultando tu turno programado…"
+      : !data?.on_shift ? "Fuera del turno programado. Los estados se habilitan al iniciar el turno."
+        : overLimit ? "Límite de Break superado. Se notificará a supervisión."
+          : "Selecciona un estado; el tiempo se registra automáticamente.";
+  panel.querySelectorAll("[data-action='set-agent-status']").forEach(button => {
+    const active = button.dataset.status === status;
+    button.disabled = agentActivityLoading || agentActivityBusy || Boolean(agentActivityError) || !data?.on_shift;
+    button.setAttribute("aria-pressed", String(active));
+    button.classList.toggle("button-primary", active);
+  });
+}
+
+async function loadAgentActivityStatus() {
+  if (profile?.role !== "agent") return;
+  agentActivityLoading = true;
+  agentActivityError = "";
+  refreshAgentActivityDisplay();
+  try {
+    const { data, error } = await client.rpc("get_agent_activity_status");
+    if (error) throw error;
+    if (!isValidAgentActivityStatus(data)) {
+      throw new Error("El servidor devolvió un estado de actividad incompleto.");
+    }
+    agentActivityStatus = data;
+    agentActivityFetchedAt = Date.now();
+  } catch (error) {
+    agentActivityStatus = null;
+    agentActivityError = error.message || "Error de conexión";
+  } finally {
+    agentActivityLoading = false;
+    refreshAgentActivityDisplay();
+  }
+}
+
+async function changeAgentActivityStatus(status) {
+  if (!Object.hasOwn(AGENT_ACTIVITY_LABELS, status)) throw new Error("El estado seleccionado no es válido.");
+  agentActivityBusy = true;
+  refreshAgentActivityDisplay();
+  try {
+    const { data, error } = await client.rpc("set_agent_activity_status", { p_status: status });
+    if (error) throw error;
+    if (!isValidAgentActivityStatus(data)) {
+      throw new Error("El servidor devolvió un estado de actividad incompleto.");
+    }
+    agentActivityStatus = data;
+    agentActivityFetchedAt = Date.now();
+    agentActivityError = "";
+    toast(`Estado actualizado: ${AGENT_ACTIVITY_LABELS[status]}.`);
+  } catch (error) {
+    await loadAgentActivityStatus();
+    throw error;
+  } finally {
+    agentActivityBusy = false;
+    refreshAgentActivityDisplay();
+  }
+}
+
 function refreshSessionDurationDisplays() {
   const now = Date.now();
   document.querySelectorAll("[data-session-start]").forEach(element => {
@@ -160,6 +278,7 @@ function renderShell() {
       <div class="top-actions"><button class="button button-small" data-action="enable-desktop">Activar avisos</button>
       <button class="button button-small" data-action="show-notifications">Avisos <span id="notification-count"></span></button>
       ${["admin", "supervisor"].includes(profile.role) && currentView === "callbacks" ? '<button class="button button-primary button-small" data-action="new-callback">+ Nuevo caso</button>' : ""}</div></header>
+      ${renderAgentActivityPanel()}
       <div id="view-container"><div class="empty-state">Cargando datos…</div></div>
       <footer class="app-footer">© Bleyser7w7 (2026). All rights reserved</footer></main></div>`;
 }
@@ -271,10 +390,15 @@ async function teamView() {
   const users = await fetchAgents();
   teamMembers = users;
   const rows = users.map(user => {
-    const status = user.role === "quality" ? "Calidad" : user.available_now ? "En turno"
-      : user.on_break ? "En pausa" : user.on_shift ? "No disponible" : "Fuera de turno";
+    const activityLabel = AGENT_ACTIVITY_LABELS[user.activity_status];
+    const status = user.role === "quality" ? "Calidad"
+      : activityLabel && user.activity_status !== "available" ? activityLabel
+        : user.available_now ? "Disponible" : user.on_break ? "En pausa"
+          : user.on_shift ? "No disponible" : "Fuera de turno";
+    const statusColor = user.role === "quality" ? "blue"
+      : status === "Disponible" ? "green" : status === "Fuera de turno" ? "gray" : "yellow";
     return `<tr><td><strong>${escapeHtml(user.full_name)}</strong></td><td>${escapeHtml(user.username)}</td><td>${escapeHtml(user.email)}</td>
-      <td>${escapeHtml(user.role_label || user.role)}</td><td><span class="pill ${user.role === "quality" ? "blue" : user.available_now ? "green" : "yellow"}">${status}</span></td></tr>`;
+      <td>${escapeHtml(user.role_label || user.role)}</td><td><span class="pill ${statusColor}">${escapeHtml(status)}</span></td></tr>`;
   }).join("");
   const { data: sessions, error: sessionsError } = await client.from("user_sessions")
     .select("id,user_id,started_at,last_seen_at,ended_at,end_reason")
@@ -309,6 +433,28 @@ async function teamView() {
     ${sessionWarning}
     <article class="panel table-wrap"><table class="data-table"><thead><tr><th>Usuario</th><th>Inicio</th><th>Fin / actividad</th><th>Duración</th><th>Estado</th></tr></thead>
       <tbody>${sessionRows || `<tr><td colspan="5" class="empty-state">${sessionsError ? "Registro de sesiones no disponible." : "Aún no hay sesiones registradas."}</td></tr>`}</tbody></table></article></section>`;
+}
+
+function renderAgentActivityReport(rows) {
+  const statusRows = rows.map(row => {
+    const breakSeconds = Number(row.break_seconds);
+    const overLimit = breakSeconds > AGENT_BREAK_LIMIT_SECONDS;
+    const status = AGENT_ACTIVITY_LABELS[row.current_status] || "Fuera de turno";
+    return `<tr class="${overLimit ? "agent-activity-over-limit" : ""}">
+      <td><strong>${escapeHtml(row.full_name)}</strong></td>
+      <td>${escapeHtml(localDateTime(row.shift_started_at))}<div class="subtle">${escapeHtml(localDateTime(row.shift_ends_at))}</div></td>
+      <td><span class="pill ${row.current_status === "available" ? "green" : row.current_status === "off_shift" ? "gray" : "yellow"}">${escapeHtml(status)}</span></td>
+      <td>${formatActivityDuration(row.available_seconds)}</td>
+      <td><span class="${overLimit ? "agent-activity-over-limit-label" : ""}">${formatActivityDuration(breakSeconds)}</span></td>
+      <td>${formatActivityDuration(row.pause_seconds)}</td><td>${formatActivityDuration(row.bathroom_seconds)}</td>
+      <td>${formatActivityDuration(row.training_seconds)}</td><td>${formatActivityDuration(row.feedback_seconds)}</td></tr>`;
+  }).join("");
+  return `<div class="section-heading"><div><h2>Estados y tiempos por turno</h2>
+    <span class="subtle">El Break se marca en rojo al superar 1 hora.</span></div>
+    <button class="button button-primary button-small" data-action="export-agent-activity-csv" ${rows.length ? "" : "disabled"}>Exportar CSV</button></div>
+    <article class="panel table-wrap"><table class="data-table"><thead><tr><th>Agente</th><th>Turno (hora local)</th>
+      <th>Estado actual</th><th>Disponible</th><th>Break</th><th>Pausa</th><th>Baño</th><th>Capacitación</th><th>Feedback</th></tr></thead>
+      <tbody>${statusRows || '<tr><td colspan="9" class="empty-state">No hay actividad registrada para este rango.</td></tr>'}</tbody></table></article>`;
 }
 
 async function historyView() {
@@ -364,6 +510,23 @@ async function reportsView() {
   const outcome = rows.length ? Math.round(completed / rows.length * 100) : 0;
   const from = callbackFilters.from?.slice(0, 10) || "";
   const to = callbackFilters.to?.slice(0, 10) || "";
+  let activityReportSection = "";
+  agentActivityReportRows = [];
+  if (["admin", "supervisor", "quality"].includes(profile.role)) {
+    const { data: activityRows, error: activityError } = await client.rpc("agent_activity_report", {
+      p_from: from || null,
+      p_to: to || null,
+      p_agent_id: callbackFilters.agentId || null
+    });
+    if (activityError) {
+      activityReportSection = `<p class="notice error">No se pudo cargar el reporte de estados: ${escapeHtml(activityError.message)}. Aplica database/schema.sql y database/policies.sql.</p>`;
+    } else if (!Array.isArray(activityRows)) {
+      activityReportSection = '<p class="notice error">El servidor devolvió un reporte de estados incompleto.</p>';
+    } else {
+      agentActivityReportRows = activityRows;
+      activityReportSection = renderAgentActivityReport(activityRows);
+    }
+  }
   const statusOptions = [
     ["", "Todos los estados"], ["pending", "Pendiente"], ["queued", "En cola"], ["assigned", "Asignado"],
     ["due_soon", "Próximo a vencer"], ["in_call", "En llamada"], ["overdue", "Retrasado"],
@@ -386,6 +549,7 @@ async function reportsView() {
     <article class="stat-card"><div class="stat-label">Cumplidos</div><div class="stat-value">${completed}</div></article>
     <article class="stat-card"><div class="stat-label">Cumplimiento de casos</div><div class="stat-value">${outcome}%</div><div class="stat-foot">Cumplidos / total de casos</div></article>
     <article class="stat-card"><div class="stat-label">Retrasados</div><div class="stat-value">${rows.filter(row => row.status === "overdue").length}</div></article></div>
+    ${activityReportSection}
     <div class="section-heading"><h2>Detalle filtrado</h2><span class="subtle">Para PDF, selecciona «Guardar como PDF» en el diálogo de impresión.</span></div>
     <article class="panel table-wrap"><table class="data-table"><thead><tr><th>Caso</th><th>Cliente</th><th>Programado</th><th>Estado</th><th>Agente</th></tr></thead>
     <tbody>${rows.map(row => `<tr><td>${escapeHtml(row.case_number)}</td><td>${escapeHtml(row.customer_name)}</td>
@@ -678,13 +842,16 @@ function finishModal(callbackId) {
 
 function assignmentModal(callbackId) {
       const agentOptions = agents.filter(item => item.role === "agent")
-        .map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}${item.available_now ? " · En turno" : item.on_break ? " · En pausa" : " · Fuera de turno"}</option>`).join("");
+        .map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}${item.available_now ? " · Disponible"
+          : item.on_break ? " · En pausa"
+            : item.activity_status ? ` · ${escapeHtml(AGENT_ACTIVITY_LABELS[item.activity_status] || item.activity_status)}`
+              : item.on_shift ? " · No disponible" : " · Fuera de turno"}</option>`).join("");
       return `<div class="modal-backdrop" data-action="dismiss-modal"><section class="modal" role="dialog" aria-modal="true">
         <header class="modal-header"><h2>Asignar caso</h2><button class="text-button" data-action="close-modal">✕</button></header>
         <form id="assign-form" data-id="${callbackId}"><div class="form-grid">
           <label class="field-label">Método<select class="field-select" name="mode"><option value="auto">Automático · equilibrar carga</option><option value="manual">Manual</option></select></label>
           <label class="field-label">Agente<select class="field-select" name="agent_id"><option value="">Selecciona un agente</option>${agentOptions}</select></label>
-        </div><div class="notice" id="modal-message">Solo se asignará a agentes dentro de su turno y fuera de sus pausas.</div>
+        </div><div class="notice" id="modal-message">Solo se asignará a agentes en turno, marcados como Disponible y fuera de sus pausas.</div>
         <footer class="modal-footer"><button class="button" type="button" data-action="close-modal">Cancelar</button>
           <button class="button button-primary">Asignar caso</button></footer></form></section></div>`;
 }
@@ -722,7 +889,9 @@ function clearUserImportData() {
 
 async function runAction(action, target) {
   const id = target.dataset.id;
-  if (action === "logout") {
+  if (action === "set-agent-status") {
+    await changeAgentActivityStatus(target.dataset.status);
+  } else if (action === "logout") {
     try {
       await endSessionTracking("logout");
     } catch (sessionError) {
@@ -785,6 +954,9 @@ async function runAction(action, target) {
     await renderView();
   } else if (action === "export-csv") {
     await exportCsv(profile, callbackFilters);
+  } else if (action === "export-agent-activity-csv") {
+    if (!agentActivityReportRows.length) throw new Error("No hay datos de actividad para exportar.");
+    exportAgentActivityCsv(agentActivityReportRows);
   } else if (action === "print-report") {
     window.print();
   } else if (action === "enable-desktop") {
@@ -981,6 +1153,13 @@ async function initialize() {
       toast(`No se pudo iniciar el registro de tiempo: ${sessionError.message}`, "error");
     }
     renderShell();
+    if (profile.role === "agent") {
+      await loadAgentActivityStatus();
+      window.clearInterval(agentActivityTimer);
+      agentActivityTimer = window.setInterval(refreshAgentActivityDisplay, 1000);
+      window.clearInterval(agentActivityRefreshTimer);
+      agentActivityRefreshTimer = window.setInterval(loadAgentActivityStatus, 60_000);
+    }
     await renderView();
     await refreshNotifications();
     notificationsChannel = subscribeNotifications(profile.id, notification => {
@@ -991,6 +1170,10 @@ async function initialize() {
     realtimeChannel = client.channel("callback-updates")
       .on("postgres_changes", { event: "*", schema: "public", table: "callbacks" }, () => {
         renderView().catch(error => toast(error.message, "error"));
+      }).on("postgres_changes", { event: "*", schema: "public", table: "agent_activity_events" }, () => {
+        if (["admin", "supervisor", "quality"].includes(profile.role)) {
+          renderView().catch(error => toast(error.message, "error"));
+        }
       }).subscribe();
   } catch (error) {
     root.innerHTML = `<div class="login-card"><h1>Error de acceso</h1><p class="notice error">${escapeHtml(error.message)}</p><a class="button button-primary" href="login.html">Volver a iniciar sesión</a></div>`;
@@ -1000,12 +1183,17 @@ async function initialize() {
 window.addEventListener("pagehide", () => {
   clearUserImportData();
   endSessionOnPageHide();
+  window.clearInterval(agentActivityTimer);
+  window.clearInterval(agentActivityRefreshTimer);
   if (realtimeChannel) client?.removeChannel(realtimeChannel);
   if (notificationsChannel) client?.removeChannel(notificationsChannel);
 });
 
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) updateSessionHeartbeat();
+  if (!document.hidden) {
+    updateSessionHeartbeat();
+    loadAgentActivityStatus();
+  }
 });
 
 initialize();

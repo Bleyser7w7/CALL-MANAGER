@@ -16,9 +16,11 @@ GitHub Pages está publicado. Para usar la dirección gratuita de GitHub Pages e
 - Registro de inicio, actividad y salida de sesión por usuario; administración y supervisión pueden consultar las últimas 100 sesiones desde **Equipo**.
 - Inicio de sesión con usuario único; el correo se conserva para recuperar la contraseña y recibir comunicaciones de la cuenta.
 - Registro de callbacks con responsable, programación, prioridad y datos del cliente.
-- Asignación manual o automática con carga equilibrada; el servidor solo asigna durante el turno y fuera de pausas. Sin agente disponible, el caso queda en cola y se avisa a supervisión.
+- Asignación manual o automática con carga equilibrada; el servidor solo asigna a agentes en turno, marcados como Disponibles y fuera de pausas programadas. Sin agente disponible, el caso queda en cola y se avisa a supervisión.
 - Inicio de llamada y registro de intentos mediante funciones SQL que comprueban rol y asignación.
 - Horarios semanales, pausas, historial de intentos, alertas en tiempo real y avisos de escritorio optativos.
+- Control de estados para agentes: Disponible, Break, Pausa, Baño, Capacitación y Feedback. El tiempo se registra por turno; solo Break consume la cuota de 60 minutos. Al excederla, el estado y el reporte se marcan en rojo y se genera una alerta única para administración/supervisión.
+- El control de estados respeta la disponibilidad: mientras un agente no esté en Disponible no recibe nuevos casos. El reporte de turnos se consulta en **Reportes** y se puede descargar como CSV.
 - Alertas servidoras a 10 y 5 minutos, marcación de retraso 10 minutos después y aviso de casos pendientes al cierre del turno.
 - Reportes filtrables, descarga CSV e impresión del navegador para guardar como PDF.
 - Creación de usuarios por una Edge Function protegida; nunca requiere la clave de servicio en el navegador.
@@ -39,7 +41,7 @@ Los gráficos presentan conteos por estado y métricas calculadas sobre los caso
 
 ## Configuración
 
-1. En Supabase, abre **SQL Editor** y ejecuta, en este orden, `database/schema.sql`, `database/policies.sql` y `database/seed.sql`. Al actualizar una instalación existente, vuelve a ejecutar los dos primeros archivos para habilitar el rol Calidad y el registro de sesiones. Si PostgREST aún indica que no encuentra `public.user_sessions`, ejecuta `NOTIFY pgrst, 'reload schema';` y vuelve a cargar la aplicación.
+1. En Supabase, abre **SQL Editor** y ejecuta, en este orden, `database/schema.sql`, `database/policies.sql` y `database/seed.sql`. Al actualizar una instalación existente, vuelve a ejecutar los dos primeros archivos antes de publicar el frontend; incluyen el historial de estados, sus permisos y el reporte. El cron existente `callback-manager-process-alerts` procesa también las alertas de Break. Si PostgREST aún indica que no encuentra una tabla recién agregada, ejecuta `NOTIFY pgrst, 'reload schema';` y vuelve a cargar la aplicación.
 2. En `js/config.js`, reemplaza `url` y `anonKey` por la URL del proyecto y la clave pública `anon`/publishable. Esta clave es pública por diseño; RLS es la barrera de seguridad. No pegues la `service_role` en ningún archivo del navegador.
 3. En **Authentication → URL Configuration**, configura el dominio de despliegue y su URL de redirección. En producción, desactiva el registro público (`Allow new users to sign up`); las cuentas se crean desde la interfaz de administración.
 4. Instala/inicia sesión con Supabase CLI y enlaza el proyecto:
