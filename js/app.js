@@ -1,5 +1,5 @@
 import { isSupabaseConfigured, requireSupabase } from "./supabase.js";
-import { createCallback, fetchCallbacks, finishCall, startCall, assignCallback, closeCallback, statusInfo, localDateTime } from "./callbacks.js";
+import { createCallback, fetchCallbacks, fetchCaseSupervisors, finishCall, startCall, assignCallback, closeCallback, statusInfo, localDateTime } from "./callbacks.js";
 import { fetchAgents } from "./assignments.js";
 import { getSchedules, saveDailySchedule } from "./schedules.js";
 import { fetchNotifications, markNotificationRead, notifyDesktop, subscribeNotifications } from "./notifications.js";
@@ -41,6 +41,14 @@ const AGENT_AVAILABILITY_LIMIT_SECONDS = 8 * 60 * 60;
 const AGENT_ACTIVITY_STATUSES = [
   ["available", "Disponible"], ["break", "Break"], ["pause", "Pausa"],
   ["bathroom", "Baño"], ["training", "Capacitación"], ["feedback", "Feedback"]
+];
+const AGENT_ACTIVITY_COUNTERS = [
+  ["available", "Disponible utilizado", "8 h"],
+  ["break", "Break utilizado", "1 h"],
+  ["pause", "Pausa utilizada", ""],
+  ["bathroom", "Baño utilizado", ""],
+  ["training", "Capacitación utilizada", ""],
+  ["feedback", "Feedback utilizado", ""]
 ];
 const AGENT_ACTIVITY_LABELS = Object.fromEntries(AGENT_ACTIVITY_STATUSES);
 
@@ -138,7 +146,11 @@ function isValidAgentActivityStatus(data) {
     && typeof data.rest_day === "boolean"
     && typeof data.availability_limit_reached === "boolean"
     && Number.isFinite(Number(data.break_seconds))
-    && Number.isFinite(Number(data.available_seconds));
+    && Number.isFinite(Number(data.available_seconds))
+    && Number.isFinite(Number(data.pause_seconds))
+    && Number.isFinite(Number(data.bathroom_seconds))
+    && Number.isFinite(Number(data.training_seconds))
+    && Number.isFinite(Number(data.feedback_seconds));
 }
 
 function renderAgentActivityPanel() {
@@ -147,12 +159,9 @@ function renderAgentActivityPanel() {
     <div class="agent-activity-heading"><div><h2>Estado y tiempos</h2>
       <p class="subtle">Disponible se acumula por día. Límite diario: 8 horas; Break: 1 hora.</p></div>
       <span id="agent-activity-current-status" class="pill gray">Consultando…</span></div>
-    <div class="agent-activity-counters">
-      <div class="agent-activity-counter"><span>Disponible utilizado</span>
-        <strong id="agent-activity-available-time">0 h 0 min 0 s</strong><span>/ 8 h 0 min 0 s</span></div>
-      <div class="agent-activity-counter"><span>Break utilizado</span>
-        <strong id="agent-activity-break-time">0 h 0 min 0 s</strong><span>/ 1 h 0 min 0 s</span></div>
-    </div>
+    <div class="agent-activity-counters">${AGENT_ACTIVITY_COUNTERS.map(([status, label, limit]) =>
+      `<div class="agent-activity-counter"><span>${label}</span>
+        <strong id="agent-activity-${status}-time">0 h 0 min 0 s</strong>${limit ? `<span>/ ${limit}</span>` : ""}</div>`).join("")}</div>
     <div class="agent-activity-actions">${AGENT_ACTIVITY_STATUSES.map(([value, label]) =>
       `<button class="button button-small" data-action="set-agent-status" data-status="${value}" aria-pressed="false" disabled>${label}</button>`).join("")}</div>
     <p id="agent-activity-message" class="notice" role="status"></p>
@@ -175,14 +184,25 @@ function refreshAgentActivityDisplay() {
     || availabilityUsedSeconds >= AGENT_AVAILABILITY_LIMIT_SECONDS;
   const overLimit = breakOverLimit || availabilityLimitReached;
   const statusPill = panel.querySelector("#agent-activity-current-status");
-  const breakTimeDisplay = panel.querySelector("#agent-activity-break-time");
-  const availableTimeDisplay = panel.querySelector("#agent-activity-available-time");
   const message = panel.querySelector("#agent-activity-message");
+  const statusSeconds = {
+    available: availableSeconds,
+    break: breakSeconds,
+    pause: Number(data?.pause_seconds) || 0,
+    bathroom: Number(data?.bathroom_seconds) || 0,
+    training: Number(data?.training_seconds) || 0,
+    feedback: Number(data?.feedback_seconds) || 0
+  };
+  if (Object.hasOwn(statusSeconds, status)) {
+    statusSeconds[status] += Math.floor(Math.max(0, (Date.now() - agentActivityFetchedAt) / 1000));
+  }
   panel.classList.toggle("over-limit", overLimit);
   statusPill.textContent = agentActivityLoading ? "Consultando…" : AGENT_ACTIVITY_LABELS[status] || "Fuera de turno";
   statusPill.className = `pill ${overLimit ? "red" : status === "available" ? "green" : status === "off_shift" ? "gray" : "yellow"}`;
-  availableTimeDisplay.textContent = formatActivityDuration(availabilityUsedSeconds);
-  breakTimeDisplay.textContent = formatActivityDuration(breakUsedSeconds);
+  for (const [activityStatus] of AGENT_ACTIVITY_COUNTERS) {
+    const timeDisplay = panel.querySelector(`#agent-activity-${activityStatus}-time`);
+    timeDisplay.textContent = formatActivityDuration(statusSeconds[activityStatus]);
+  }
   message.className = `notice${agentActivityError || overLimit ? " error" : ""}`;
   message.textContent = agentActivityError
     ? `No se pudo cargar el control de estados: ${agentActivityError}. Aplica database/schema.sql y database/policies.sql.`
@@ -298,7 +318,7 @@ function renderShell() {
     <main class="main-area"><header class="topbar"><div><p class="eyebrow">${escapeHtml(profile.role_label.toUpperCase())}</p><h1 class="page-title">${title}</h1><p class="page-subtitle">${subtitle}</p></div>
       <div class="top-actions"><button class="button button-small" data-action="enable-desktop">Activar avisos</button>
       <button class="button button-small" data-action="show-notifications">Avisos <span id="notification-count"></span></button>
-      ${["admin", "supervisor"].includes(profile.role) && currentView === "callbacks" ? '<button class="button button-primary button-small" data-action="new-callback">+ Nuevo caso</button>' : ""}</div></header>
+      ${["admin", "supervisor", "agent"].includes(profile.role) && currentView === "callbacks" ? '<button class="button button-primary button-small" data-action="new-callback">+ Nuevo caso</button>' : ""}</div></header>
       ${renderAgentActivityPanel()}
       <div id="view-container"><div class="empty-state">Cargando datos…</div></div>
       <footer class="app-footer">© Bleyser7w7 (2026). All rights reserved</footer></main></div>`;
@@ -331,15 +351,20 @@ async function callbacksView() {
   agents = latestAgents.filter(item => item.role === "agent");
   const supervisors = latestAgents.filter(item => item.role === "supervisor" || item.role === "admin");
   const body = rows.map(row => {
-    const assignedTo = row.assignment?.profiles?.full_name || "Sin asignar";
-    const canCall = profile.role === "agent" && ["assigned", "pending", "due_soon", "overdue", "rescheduled"].includes(row.status);
+    const assignedTo = row.assignment?.profiles?.full_name
+      || (profile.role === "agent" && row.created_by === profile.id
+        && ["assigned", "due_soon", "overdue", "in_call", "rescheduled"].includes(row.status)
+        ? "Asignado por supervisión" : "Sin asignar");
+    const canCall = profile.role === "agent" && row.assignment?.agent_id === profile.id
+      && ["assigned", "pending", "due_soon", "overdue", "rescheduled"].includes(row.status);
     const canAssign = ["admin", "supervisor"].includes(profile.role) && !["completed", "cancelled", "unfulfilled"].includes(row.status);
     const actions = [
       canCall ? `<button class="button button-small button-primary" data-action="start-call" data-id="${row.id}">Iniciar llamada</button>` : "",
       canAssign ? `<button class="button button-small" data-action="assign" data-id="${row.id}">Asignar</button>` : "",
       canAssign ? `<button class="button button-small button-danger" data-action="close-case" data-status="unfulfilled" data-id="${row.id}">Incumplido</button>` : "",
       canAssign ? `<button class="button button-small" data-action="close-case" data-status="cancelled" data-id="${row.id}">Cancelar</button>` : "",
-      row.status === "in_call" && profile.role === "agent" ? `<button class="button button-small button-primary" data-action="finish-call" data-id="${row.id}">Finalizar</button>` : ""
+      row.status === "in_call" && profile.role === "agent" && row.assignment?.agent_id === profile.id
+        ? `<button class="button button-small button-primary" data-action="finish-call" data-id="${row.id}">Finalizar</button>` : ""
     ].filter(Boolean).join("");
     return `<tr><td><strong>${escapeHtml(row.case_number)}</strong><div class="subtle">${escapeHtml(row.reason)}</div></td>
       <td>${escapeHtml(row.customer_name)}<div class="subtle">${escapeHtml(row.phone)}</div></td>
@@ -354,8 +379,13 @@ async function callbacksView() {
     ${profile.role !== "agent" ? `<datalist id="supervisor-options">${supervisorOptions}</datalist>` : ""}</section>`;
 }
 
-function newCallbackModal() {
-  const supervisors = agents.filter(item => item.role === "supervisor" || item.role === "admin");
+async function newCallbackModal() {
+  const supervisors = profile.role === "agent" ? await fetchCaseSupervisors()
+    : agents.filter(item => item.role === "supervisor" || item.role === "admin");
+  const supervisorOptions = supervisors.map(item => `<option value="${item.id}" ${profile.role === "supervisor" && profile.id === item.id ? "selected" : ""}>${escapeHtml(item.full_name)}</option>`).join("");
+  const agentMessage = supervisors.length
+    ? "El caso quedará pendiente para que el supervisor elegido lo asigne a un agente."
+    : "No hay supervisores disponibles. Contacta a administración antes de registrar casos.";
   return `<div class="modal-backdrop" data-action="dismiss-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <header class="modal-header"><h2 id="modal-title">Registrar caso</h2><button class="text-button" data-action="close-modal" aria-label="Cerrar">✕</button></header>
     <form id="callback-form"><div class="form-grid">
@@ -365,12 +395,12 @@ function newCallbackModal() {
       <label class="field-label">Prioridad<select class="field-select" name="priority"><option value="normal">Normal</option><option value="high">Alta</option><option value="urgent">Urgente</option></select></label>
       <label class="field-label">Fecha de devolución<input class="field" name="scheduled_date" type="date" required></label>
       <label class="field-label">Hora de devolución<input class="field" name="scheduled_time" type="time" required></label>
-      <label class="field-label">Supervisor responsable<select class="field-select" name="supervisor_id" required>${supervisors.map(item => `<option value="${item.id}" ${profile.id === item.id ? "selected" : ""}>${escapeHtml(item.full_name)}</option>`).join("")}</select></label>
+      <label class="field-label">Supervisor responsable<select class="field-select" name="supervisor_id" required>${supervisorOptions}</select></label>
       <label class="field-label">Motivo de llamada<input class="field" name="reason" required maxlength="200"></label>
       <label class="field-label full">Problema reportado<textarea class="field-textarea" name="problem" required maxlength="4000"></textarea></label>
       <label class="field-label full">Observaciones<textarea class="field-textarea" name="notes" maxlength="4000"></textarea></label>
-    </div><div class="notice" id="modal-message"></div><footer class="modal-footer"><button class="button" type="button" data-action="close-modal">Cancelar</button>
-      <button class="button button-primary" type="submit">Guardar y asignar</button></footer></form></section></div>`;
+    </div><div class="notice" id="modal-message">${profile.role === "agent" ? agentMessage : "El caso se asignará automáticamente si hay un agente Disponible."}</div><footer class="modal-footer"><button class="button" type="button" data-action="close-modal">Cancelar</button>
+      <button class="button button-primary" type="submit" ${profile.role === "agent" && !supervisors.length ? "disabled" : ""}>${profile.role === "agent" ? "Enviar al supervisor" : "Guardar y asignar"}</button></footer></form></section></div>`;
 }
 
 async function schedulesView() {
@@ -625,7 +655,7 @@ function renderShellHeader() {
   const actions = header.querySelector(".top-actions");
   if (actions) {
     const create = actions.querySelector('[data-action="new-callback"]');
-    if (currentView === "callbacks" && ["admin", "supervisor"].includes(profile.role) && !create) {
+    if (currentView === "callbacks" && ["admin", "supervisor", "agent"].includes(profile.role) && !create) {
       actions.insertAdjacentHTML("beforeend", '<button class="button button-primary button-small" data-action="new-callback">+ Nuevo caso</button>');
     } else if (currentView !== "callbacks") create?.remove();
   }
@@ -873,9 +903,8 @@ function finishModal(callbackId) {
         <option value="contacted">Cliente contactado</option><option value="no_answer">Cliente no contesta</option>
         <option value="wrong_number">Número incorrecto</option><option value="callback_requested">Solicita otra llamada</option>
         <option value="declined">Rechaza atención</option><option value="other">Otro motivo</option></select></label>
-      <label class="field-label">Reprogramar (opcional)<input class="field" name="reschedule_at" type="datetime-local"></label>
       <label class="field-label full">Notas<textarea class="field-textarea" name="notes"></textarea></label></div>
-      <p class="subtle">No contactar al cliente no marca el caso como incumplido. Puedes reprogramar o dejarlo asignado para otro intento.</p>
+      <p class="subtle">Registrar cualquier resultado confirma que la llamada se realizó y marca el caso como Cumplido.</p>
       <div class="notice" id="modal-message"></div><footer class="modal-footer"><button class="button" type="button" data-action="close-modal">Cancelar</button>
       <button class="button button-primary">Guardar resultado</button></footer></form></section></div>`;
 }
@@ -933,7 +962,7 @@ async function runAction(action, target) {
   } else if (action === "new-callback") {
     const latestAgents = await fetchAgents();
     agents = latestAgents;
-    root.insertAdjacentHTML("beforeend", newCallbackModal());
+    root.insertAdjacentHTML("beforeend", await newCallbackModal());
   } else if (action === "close-modal") {
     const modal = target.closest(".modal-backdrop");
     const importForm = modal?.querySelector("#user-import-form");
@@ -1048,21 +1077,25 @@ root?.addEventListener("submit", async event => {
       const values = Object.fromEntries(new FormData(form));
       const callback = await createCallback({ ...values, created_by: profile.id });
       form.closest(".modal-backdrop").remove();
-      toast("Caso registrado.");
-      try {
-        await assignCallback(callback.id, null);
-        toast("Se asignó automáticamente a un agente disponible.");
-      } catch (assignmentError) {
-        toast(`Caso creado, pendiente de asignación: ${assignmentError.message}`, "error");
+      if (profile.role === "agent") {
+        toast("Caso registrado y enviado al supervisor para asignación.");
+      } else {
+        toast("Caso registrado.");
+        try {
+          await assignCallback(callback.id, null);
+          toast("Se asignó automáticamente a un agente disponible.");
+        } catch (assignmentError) {
+          toast(`Caso creado, pendiente de asignación: ${assignmentError.message}`, "error");
+        }
       }
       currentView = "callbacks";
       renderShell();
       await renderView();
     } else if (form.id === "finish-form") {
       const values = Object.fromEntries(new FormData(form));
-      await finishCall({ id: form.dataset.id }, values.outcome, values.notes || "", values.reschedule_at || null);
+      await finishCall({ id: form.dataset.id }, values.outcome, values.notes || "");
       form.closest(".modal-backdrop").remove();
-      toast("Resultado guardado.");
+      toast("Resultado guardado. Caso marcado como Cumplido.");
       await renderView();
     } else if (form.id === "assign-form") {
       const values = Object.fromEntries(new FormData(form));

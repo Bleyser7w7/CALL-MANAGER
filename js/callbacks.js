@@ -26,10 +26,16 @@ export async function fetchCallbacks({ profile, filters = {} }) {
   if (filters.from) query = query.gte("scheduled_at", filters.from);
   if (filters.to) query = query.lte("scheduled_at", filters.to);
   if (profile.role === "agent") {
-    const { data: assignments, error: assignmentError } = await client
-      .from("callback_assignments").select("callback_id").eq("agent_id", profile.id).eq("active", true);
+    const [{ data: assignments, error: assignmentError }, { data: createdCases, error: createdError }] = await Promise.all([
+      client.from("callback_assignments").select("callback_id").eq("agent_id", profile.id).eq("active", true),
+      client.from("callbacks").select("id").eq("created_by", profile.id)
+    ]);
     if (assignmentError) throw assignmentError;
-    const ids = (assignments || []).map(item => item.callback_id);
+    if (createdError) throw createdError;
+    const ids = [...new Set([
+      ...(assignments || []).map(item => item.callback_id),
+      ...(createdCases || []).map(item => item.id)
+    ])];
     if (!ids.length) return [];
     query = query.in("id", ids);
   }
@@ -83,19 +89,23 @@ export async function startCall(callback) {
   return data;
 }
 
-export async function finishCall(callback, outcome, notes, rescheduleAt) {
+export async function finishCall(callback, outcome, notes) {
   const client = requireSupabase();
-  const limaReschedule = rescheduleAt
-    ? new Date(`${rescheduleAt}:00-05:00`).toISOString()
-    : null;
   const { data, error } = await client.rpc("finish_callback", {
     p_callback_id: callback.id,
     p_outcome: outcome,
     p_notes: notes.trim(),
-    p_reschedule_at: limaReschedule
+    p_reschedule_at: null
   });
   if (error) throw error;
   return data;
+}
+
+export async function fetchCaseSupervisors() {
+  const client = requireSupabase();
+  const { data, error } = await client.rpc("list_case_supervisors");
+  if (error) throw error;
+  return data || [];
 }
 
 async function getFunctionErrorMessage(error, data) {

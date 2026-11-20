@@ -26,7 +26,7 @@
 .agent-activity-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
 .agent-activity-heading h2{margin:0 0 5px;font:700 17px Manrope,sans-serif}
 .agent-activity-heading p{margin:0}
-.agent-activity-counters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin:16px 0}
+.agent-activity-counters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:16px 0}
 .agent-activity-counter{display:flex;align-items:baseline;gap:10px;color:var(--muted);font-size:12px}
 .agent-activity-counter strong{color:var(--text);font:700 20px Manrope,sans-serif}
 .agent-activity-panel.over-limit .agent-activity-counter strong,.agent-activity-over-limit-label{color:var(--red)}

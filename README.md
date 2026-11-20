@@ -15,11 +15,12 @@ GitHub Pages está publicado. Para usar la dirección gratuita de GitHub Pages e
 - Rol Calidad de solo lectura para revisar callbacks, asignaciones, intentos e informes, sin permisos para crear, asignar o cerrar casos.
 - Registro de inicio, actividad y salida de sesión por usuario; administración y supervisión pueden consultar las últimas 100 sesiones desde **Equipo**.
 - Inicio de sesión con usuario único; el correo se conserva para recuperar la contraseña y recibir comunicaciones de la cuenta.
-- Registro de callbacks con responsable, programación, prioridad y datos del cliente.
+- Registro de callbacks con responsable, programación, prioridad y datos del cliente. Los agentes también pueden crear casos, elegir supervisor responsable y dejarlos pendientes para que supervisión los asigne o reasigne a un agente.
+- Al guardar cualquier resultado de llamada, el intento queda registrado y el caso se marca como Cumplido; las notas y el resultado elegido conservan el detalle de la gestión.
 - Asignación manual o automática con carga equilibrada; el servidor solo asigna a agentes marcados como Disponibles, con un horario diario válido, fuera de su día de descanso y con menos de 8 horas acumuladas ese día. Las horas de inicio y fin del horario son una referencia y no limitan la disponibilidad.
 - Inicio de llamada y registro de intentos mediante funciones SQL que comprueban rol y asignación.
 - Horario único repetido diariamente, con un solo día de descanso semanal; el agente conserva la vista **Horario**. El día de descanso bloquea Disponible y nuevas asignaciones.
-- Control de estados para agentes: Disponible, Break, Pausa, Baño, Capacitación y Feedback. Los tiempos se acumulan por día de Lima. Al alcanzar 8 horas en Disponible, el agente pasa automáticamente a Pausa, queda fuera de nuevas asignaciones y administración/supervisión recibe una alerta única; el límite de Break sigue siendo 60 minutos.
+- Control de estados para agentes: Disponible, Break, Pausa, Baño, Capacitación y Feedback. El panel del agente y el reporte acumulan el tiempo de cada estado por día de Lima. Al alcanzar 8 horas en Disponible, el agente pasa automáticamente a Pausa, queda fuera de nuevas asignaciones y administración/supervisión recibe una alerta única; el límite de Break sigue siendo 60 minutos.
 - El control de estados respeta el día de descanso y los límites diarios. El reporte de tiempos por día se consulta en **Reportes**, se marca en rojo al exceder Break o alcanzar el límite de Disponible y se puede descargar como CSV.
 - Alertas servidoras a 10 y 5 minutos, marcación de retraso 10 minutos después y aviso de casos pendientes al cierre del turno.
 - Reportes filtrables, descarga CSV e impresión del navegador para guardar como PDF.

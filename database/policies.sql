@@ -23,10 +23,15 @@ create policy "callbacks role select" on public.callbacks for select to authenti
   using (public.current_user_role() in ('admin', 'supervisor', 'quality') or exists (
     select 1 from public.callback_assignments ca
     where ca.callback_id = callbacks.id and ca.agent_id = auth.uid()
-  ));
+  ) or created_by = auth.uid());
 drop policy if exists "callbacks manager insert" on public.callbacks;
-create policy "callbacks manager insert" on public.callbacks for insert to authenticated
-  with check (public.current_user_role() in ('admin', 'supervisor') and created_by = auth.uid());
+drop policy if exists "callbacks create own" on public.callbacks;
+create policy "callbacks create own" on public.callbacks for insert to authenticated
+  with check (
+    (public.current_user_role() in ('admin', 'supervisor') and created_by = auth.uid())
+    or (public.current_user_role() = 'agent' and created_by = auth.uid()
+      and exists (select 1 from public.supervisors s where s.id = supervisor_id))
+  );
 drop policy if exists "callbacks manager update" on public.callbacks;
 create policy "callbacks manager update" on public.callbacks for update to authenticated
   using (public.current_user_role() in ('admin', 'supervisor'))
@@ -127,7 +132,9 @@ grant execute on function public.start_user_session(uuid) to authenticated;
 grant execute on function public.heartbeat_user_session(uuid) to authenticated;
 grant execute on function public.end_user_session(uuid, text) to authenticated;
 revoke all on function public.current_user_role() from public, anon;
+revoke all on function public.list_case_supervisors() from public, anon;
 grant execute on function public.current_user_role() to authenticated, service_role;
+grant execute on function public.list_case_supervisors() to authenticated;
 
 revoke all on public.profiles, public.agents, public.supervisors, public.callbacks,
   public.callback_assignments, public.callback_attempts, public.agent_schedules,

@@ -196,6 +196,23 @@ create or replace function public.current_user_role()
 returns text language sql stable security definer set search_path = public
 as $$ select role from public.profiles where id = auth.uid() $$;
 
+create or replace function public.list_case_supervisors()
+returns table(id uuid, full_name text)
+language plpgsql stable security definer set search_path = public
+as $$
+begin
+  if auth.uid() is null or public.current_user_role() is distinct from 'agent' then
+    raise exception 'Solo un agente autenticado puede consultar la lista de supervisores.';
+  end if;
+  return query
+    select p.id, p.full_name
+    from public.profiles p
+    join public.supervisors s on s.id = p.id
+    where p.role = 'supervisor'
+    order by p.full_name;
+end;
+$$;
+
 create or replace function public.agent_shift_window(p_agent_id uuid, p_at timestamptz default now())
 returns table(shift_started_at timestamptz, shift_ends_at timestamptz)
 language sql stable security definer set search_path = public
@@ -269,6 +286,10 @@ declare
   v_status_since timestamptz;
   v_break_seconds bigint := 0;
   v_available_seconds bigint := 0;
+  v_pause_seconds bigint := 0;
+  v_bathroom_seconds bigint := 0;
+  v_training_seconds bigint := 0;
+  v_feedback_seconds bigint := 0;
   v_weekday smallint;
   v_activity_date date := (now() at time zone 'America/Lima')::date;
   v_schedule_working boolean;
@@ -307,19 +328,23 @@ begin
   where agent_id = v_agent_id and shift_started_at = v_shift.shift_started_at and ended_at is null
   for update;
 
-  select floor(coalesce(sum(extract(epoch from (
-    least(coalesce(ended_at, now()), shift_ends_at) - started_at
-  ))), 0))::bigint into v_break_seconds
+  select
+    floor(coalesce(sum(extract(epoch from (least(coalesce(ended_at, now()), shift_ends_at) - started_at)))
+      filter (where status = 'available'), 0))::bigint,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(ended_at, now()), shift_ends_at) - started_at)))
+      filter (where status = 'break'), 0))::bigint,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(ended_at, now()), shift_ends_at) - started_at)))
+      filter (where status = 'pause'), 0))::bigint,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(ended_at, now()), shift_ends_at) - started_at)))
+      filter (where status = 'bathroom'), 0))::bigint,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(ended_at, now()), shift_ends_at) - started_at)))
+      filter (where status = 'training'), 0))::bigint,
+    floor(coalesce(sum(extract(epoch from (least(coalesce(ended_at, now()), shift_ends_at) - started_at)))
+      filter (where status = 'feedback'), 0))::bigint
+  into v_available_seconds, v_break_seconds, v_pause_seconds, v_bathroom_seconds, v_training_seconds, v_feedback_seconds
   from public.agent_activity_events
   where agent_id = v_agent_id
-    and (shift_started_at at time zone 'America/Lima')::date = v_activity_date and status = 'break';
-
-  select floor(coalesce(sum(extract(epoch from (
-    least(coalesce(ended_at, now()), shift_ends_at) - started_at
-  ))), 0))::bigint into v_available_seconds
-  from public.agent_activity_events
-  where agent_id = v_agent_id
-    and (shift_started_at at time zone 'America/Lima')::date = v_activity_date and status = 'available';
+    and (shift_started_at at time zone 'America/Lima')::date = v_activity_date;
 
   if v_status = 'available' and (v_rest_day or v_available_seconds >= 28800) then
     update public.agent_activity_events
@@ -346,6 +371,10 @@ begin
     'shift_ends_at', v_shift.shift_ends_at,
     'break_seconds', v_break_seconds,
     'available_seconds', v_available_seconds,
+    'pause_seconds', v_pause_seconds,
+    'bathroom_seconds', v_bathroom_seconds,
+    'training_seconds', v_training_seconds,
+    'feedback_seconds', v_feedback_seconds,
     'break_over_limit', v_break_seconds > 3600,
     'availability_limit_reached', v_available_seconds >= 28800,
     'over_limit', v_break_seconds > 3600 or v_available_seconds >= 28800
@@ -729,9 +758,7 @@ begin
   insert into public.callback_attempts(callback_id, agent_id, outcome, notes)
   values (p_callback_id, auth.uid(), p_outcome, coalesce(p_notes, ''));
   update public.callbacks
-  set status = case when p_outcome = 'contacted' then 'completed'
-                    when p_reschedule_at is not null then 'rescheduled' else 'assigned' end,
-      scheduled_at = coalesce(p_reschedule_at, scheduled_at),
+  set status = 'completed',
       call_finished_at = now(), call_started_at = null
   where id = p_callback_id and status = 'in_call'
   returning * into v_callback;
