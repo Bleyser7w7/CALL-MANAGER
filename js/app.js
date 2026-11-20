@@ -842,7 +842,7 @@ function finishModal(callbackId) {
 
 function assignmentModal(callbackId) {
       const agentOptions = agents.filter(item => item.role === "agent")
-        .map(item => `<option value="${item.id}">${escapeHtml(item.full_name)}${item.available_now ? " · Disponible"
+        .map(item => `<option value="${item.id}" ${item.available_now ? "" : "disabled"}>${escapeHtml(item.full_name)}${item.available_now ? " · Disponible"
           : item.on_break ? " · En pausa"
             : item.activity_status ? ` · ${escapeHtml(AGENT_ACTIVITY_LABELS[item.activity_status] || item.activity_status)}`
               : item.on_shift ? " · No disponible" : " · Fuera de turno"}</option>`).join("");
@@ -1043,6 +1043,14 @@ root?.addEventListener("submit", async event => {
       const values = Object.fromEntries(new FormData(form));
       const agentId = values.mode === "manual" ? values.agent_id : null;
       if (values.mode === "manual" && !agentId) throw new Error("Selecciona un agente para la asignación manual.");
+      if (agentId) {
+        const selectedAgent = agents.find(item => item.id === agentId);
+        if (!selectedAgent?.available_now) {
+          throw new Error(selectedAgent
+            ? `${selectedAgent.full_name} no está disponible. Debe estar en turno y marcado como Disponible.`
+            : "Actualiza la lista de agentes e inténtalo de nuevo.");
+        }
+      }
       const result = await assignCallback(form.dataset.id, agentId);
       form.closest(".modal-backdrop").remove();
       toast(result?.status === "queued" ? "No hay agentes disponibles; el caso quedó en cola." : "Caso asignado.");

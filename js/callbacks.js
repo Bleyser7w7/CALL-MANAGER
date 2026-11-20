@@ -98,12 +98,35 @@ export async function finishCall(callback, outcome, notes, rescheduleAt) {
   return data;
 }
 
+async function getFunctionErrorMessage(error, data) {
+  if (typeof data?.error === "string") return data.error;
+  if (error?.context && typeof error.context.clone === "function") {
+    let responseBody;
+    try {
+      responseBody = await error.context.clone().text();
+    } catch (readError) {
+      return `${error.message || "No se pudo asignar el caso."} (${readError.message})`;
+    }
+    if (responseBody) {
+      try {
+        const body = JSON.parse(responseBody);
+        if (typeof body === "string") return body;
+        if (typeof body?.error === "string") return body.error;
+        if (typeof body?.message === "string") return body.message;
+      } catch {
+        return responseBody;
+      }
+    }
+  }
+  return error?.message || "No se pudo asignar el caso.";
+}
+
 export async function assignCallback(callbackId, agentId) {
   const client = requireSupabase();
   const { data, error } = await client.functions.invoke("assign-callback", {
     body: { callback_id: callbackId, agent_id: agentId || null }
   });
-  if (error) throw error;
+  if (error) throw new Error(await getFunctionErrorMessage(error, data));
   if (data?.error) throw new Error(data.error);
   return data;
 }
