@@ -587,17 +587,28 @@ async function downloadUserTemplate() {
   XLSX.writeFile(workbook, "plantilla-usuarios.xlsx");
 }
 
+function explainUserCreationError(message) {
+  const detail = String(message || "No se pudo crear.");
+  if (/already.*(registered|exists)|email_exists|profiles_email_key/i.test(detail)) {
+    return "Ese correo ya está registrado. Usa un correo diferente.";
+  }
+  if (/profiles_username_key/i.test(detail)) {
+    return "Ese nombre de usuario ya está en uso.";
+  }
+  return detail;
+}
+
 async function getUserCreationError(error, data) {
-  if (typeof data?.error === "string") return data.error;
+  if (typeof data?.error === "string") return explainUserCreationError(data.error);
   if (error?.context && typeof error.context.clone === "function") {
     try {
       const body = await error.context.clone().json();
-      if (typeof body?.error === "string") return body.error;
+      if (typeof body?.error === "string") return explainUserCreationError(body.error);
     } catch {
-      return error.message || "No se pudo crear.";
+      return explainUserCreationError(error.message);
     }
   }
-  return error?.message || "No se pudo crear.";
+  return explainUserCreationError(error?.message);
 }
 
 async function createImportedUsers(form) {
@@ -886,7 +897,7 @@ root?.addEventListener("submit", async event => {
     } else if (form.id === "user-form") {
       const values = Object.fromEntries(new FormData(form));
       const { data, error } = await client.functions.invoke("create-user", { body: values });
-      if (error) throw error;
+      if (error) throw new Error(await getUserCreationError(error, data));
       if (data?.error) throw new Error(data.error);
       form.closest(".modal-backdrop").remove();
       toast("Usuario creado.");
