@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090909">
+  <title>Iniciar sesión · Callback Manager</title>
+  <link rel="stylesheet" href="css/styles.css">
+  <script type="module" src="js/auth.js"></script>
+</head>
+<body class="login-page">
+  <main class="login-card">
+    <a class="brand" href="login.html"><span class="brand-mark">C</span><span>CALLBACK<span class="brand-light">MANAGER</span></span></a>
+    <p class="eyebrow">CENTRO DE OPERACIONES</p>
+    <h1>Bienvenido</h1>
+    <p class="muted">Inicia sesión para gestionar tus devoluciones de llamada.</p>
+    <form id="login-form" class="stack-form">
+      <label>Usuario<input name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+      <label>Contraseña<input name="password" type="password" autocomplete="current-password" required minlength="6"></label>
+      <button class="button button-primary" type="submit">Iniciar sesión <span aria-hidden="true">→</span></button>
+      <button class="text-button" type="button" id="forgot-password">¿Olvidaste tu contraseña?</button>
+    </form>
+    <form id="recovery-form" class="stack-form" hidden>
+      <label>Correo electrónico de recuperación<input name="email" type="email" autocomplete="email" required></label>
+      <button class="button button-primary" type="submit">Enviar instrucciones</button>
+      <button class="text-button" type="button" id="back-to-login">Volver a iniciar sesión</button>
+    </form>
+    <form id="reset-form" class="stack-form" hidden>
+      <label>Nueva contraseña<input name="password" type="password" autocomplete="new-password" required minlength="10"></label>
+      <label>Repite la contraseña<input name="confirm_password" type="password" autocomplete="new-password" required minlength="10"></label>
+      <button class="button button-primary" type="submit">Guardar contraseña</button>
+    </form>
+    <p class="notice" id="auth-message" role="status"></p>
+    <p class="setup-note">Configura primero las variables públicas de Supabase en <code>js/config.js</code>.</p>
+  </main>
+</body>
+</html>
