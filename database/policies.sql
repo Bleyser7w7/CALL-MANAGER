@@ -107,6 +107,7 @@ revoke all on function public.close_callback(uuid, text) from public, anon;
 revoke all on function public.process_callback_alerts() from public, anon, authenticated;
 revoke all on function public.agent_shift_window(uuid, timestamptz) from public, anon, authenticated;
 revoke all on function public.notify_agent_break_limit(uuid, timestamptz, bigint) from public, anon, authenticated;
+revoke all on function public.notify_agent_availability_limit(uuid, timestamptz, bigint) from public, anon, authenticated;
 revoke all on function public.get_agent_activity_status() from public, anon;
 revoke all on function public.set_agent_activity_status(text) from public, anon;
 revoke all on function public.process_agent_break_alerts() from public, anon, authenticated;
@@ -131,7 +132,8 @@ grant execute on function public.current_user_role() to authenticated, service_r
 revoke all on public.profiles, public.agents, public.supervisors, public.callbacks,
   public.callback_assignments, public.callback_attempts, public.agent_schedules,
   public.agent_breaks, public.notifications, public.activity_logs, public.system_settings,
-  public.user_sessions, public.agent_activity_events, public.agent_break_alerts
+  public.user_sessions, public.agent_activity_events, public.agent_break_alerts,
+  public.agent_availability_alerts
   from anon, authenticated;
 
 grant select on public.profiles, public.agents, public.supervisors, public.callbacks,
@@ -149,7 +151,8 @@ grant delete on public.agents, public.supervisors, public.callbacks,
 grant all on public.profiles, public.agents, public.supervisors, public.callbacks,
   public.callback_assignments, public.callback_attempts, public.agent_schedules,
   public.agent_breaks, public.notifications, public.activity_logs, public.system_settings,
-  public.user_sessions, public.agent_activity_events, public.agent_break_alerts
+  public.user_sessions, public.agent_activity_events, public.agent_break_alerts,
+  public.agent_availability_alerts
   to service_role;
 
 do $$

@@ -16,11 +16,11 @@ GitHub Pages está publicado. Para usar la dirección gratuita de GitHub Pages e
 - Registro de inicio, actividad y salida de sesión por usuario; administración y supervisión pueden consultar las últimas 100 sesiones desde **Equipo**.
 - Inicio de sesión con usuario único; el correo se conserva para recuperar la contraseña y recibir comunicaciones de la cuenta.
 - Registro de callbacks con responsable, programación, prioridad y datos del cliente.
-- Asignación manual o automática con carga equilibrada; el servidor solo asigna a agentes en turno, marcados como Disponibles y fuera de pausas programadas. Sin agente disponible, el caso queda en cola y se avisa a supervisión.
+- Asignación manual o automática con carga equilibrada; el servidor solo asigna a agentes marcados como Disponibles, con un horario diario válido, fuera de su día de descanso y con menos de 8 horas acumuladas ese día. Las horas de inicio y fin del horario son una referencia y no limitan la disponibilidad.
 - Inicio de llamada y registro de intentos mediante funciones SQL que comprueban rol y asignación.
-- Horarios semanales, pausas, historial de intentos, alertas en tiempo real y avisos de escritorio optativos.
-- Control de estados para agentes: Disponible, Break, Pausa, Baño, Capacitación y Feedback. El tiempo se registra por turno; solo Break consume la cuota de 60 minutos. Al excederla, el estado y el reporte se marcan en rojo y se genera una alerta única para administración/supervisión.
-- El control de estados respeta la disponibilidad: mientras un agente no esté en Disponible no recibe nuevos casos. El reporte de turnos se consulta en **Reportes** y se puede descargar como CSV.
+- Horario único repetido diariamente, con un solo día de descanso semanal; el agente conserva la vista **Horario**. El día de descanso bloquea Disponible y nuevas asignaciones.
+- Control de estados para agentes: Disponible, Break, Pausa, Baño, Capacitación y Feedback. Los tiempos se acumulan por día de Lima. Al alcanzar 8 horas en Disponible, el agente pasa automáticamente a Pausa, queda fuera de nuevas asignaciones y administración/supervisión recibe una alerta única; el límite de Break sigue siendo 60 minutos.
+- El control de estados respeta el día de descanso y los límites diarios. El reporte de tiempos por día se consulta en **Reportes**, se marca en rojo al exceder Break o alcanzar el límite de Disponible y se puede descargar como CSV.
 - Alertas servidoras a 10 y 5 minutos, marcación de retraso 10 minutos después y aviso de casos pendientes al cierre del turno.
 - Reportes filtrables, descarga CSV e impresión del navegador para guardar como PDF.
 - Creación de usuarios por una Edge Function protegida; nunca requiere la clave de servicio en el navegador.
@@ -29,7 +29,7 @@ GitHub Pages está publicado. Para usar la dirección gratuita de GitHub Pages e
 
 Las contraseñas del archivo se procesan en el navegador y se envían a la Edge Function protegida de Supabase mediante HTTPS; no se incluyen en el informe de resultados. Usa contraseñas temporales, protege el archivo y elimínalo cuando termine la carga. Las filas válidas se crean individualmente: los errores de una fila no cancelan las demás.
 
-El tiempo de sesión se actualiza cada minuto. El cierre de sesión normal registra la salida; si se cierra el navegador inesperadamente, se usa la última actividad registrada y se marca como cierre estimado al reconectar. Los horarios de turnos existentes siguen siendo independientes.
+El tiempo de sesión se actualiza cada minuto. El cierre de sesión normal registra la salida; si se cierra el navegador inesperadamente, se usa la última actividad registrada y se marca como cierre estimado al reconectar. Este registro es independiente de los estados diarios del agente.
 
 Los gráficos presentan conteos por estado y métricas calculadas sobre los casos recuperados. No se declaran como fuentes de datos los indicadores que aún no tienen integración propia.
 
@@ -41,7 +41,7 @@ Los gráficos presentan conteos por estado y métricas calculadas sobre los caso
 
 ## Configuración
 
-1. En Supabase, abre **SQL Editor** y ejecuta, en este orden, `database/schema.sql`, `database/policies.sql` y `database/seed.sql`. Al actualizar una instalación existente, vuelve a ejecutar los dos primeros archivos antes de publicar el frontend; incluyen el historial de estados, sus permisos y el reporte. El cron existente `callback-manager-process-alerts` procesa también las alertas de Break. Si PostgREST aún indica que no encuentra una tabla recién agregada, ejecuta `NOTIFY pgrst, 'reload schema';` y vuelve a cargar la aplicación.
+1. En Supabase, abre **SQL Editor** y ejecuta, en este orden, `database/schema.sql`, `database/policies.sql` y `database/seed.sql`. Al actualizar una instalación existente, vuelve a ejecutar los dos primeros archivos antes de publicar el frontend; incluyen el horario diario, el límite de Disponible, las alertas, el historial y el reporte diario. El cron existente `callback-manager-process-alerts` procesa las alertas y el cambio automático a Pausa. Si PostgREST aún indica que no encuentra una tabla o función recién agregada, ejecuta `NOTIFY pgrst, 'reload schema';` y vuelve a cargar la aplicación.
 2. En `js/config.js`, reemplaza `url` y `anonKey` por la URL del proyecto y la clave pública `anon`/publishable. Esta clave es pública por diseño; RLS es la barrera de seguridad. No pegues la `service_role` en ningún archivo del navegador.
 3. En **Authentication → URL Configuration**, configura el dominio de despliegue y su URL de redirección. En producción, desactiva el registro público (`Allow new users to sign up`); las cuentas se crean desde la interfaz de administración.
 4. Instala/inicia sesión con Supabase CLI y enlaza el proyecto:
@@ -83,7 +83,7 @@ Los gráficos presentan conteos por estado y métricas calculadas sobre los caso
    delete from public.supervisors where id = 'UUID-DEL-USUARIO';
    ```
 
-   A partir de ahí el administrador puede dar de alta agentes, supervisores y usuarios de Calidad en **Equipo**. Define los turnos de agentes en **Horarios** antes de asignarles casos. Las cuentas nuevas no tienen turnos por defecto.
+   A partir de ahí el administrador puede dar de alta agentes, supervisores y usuarios de Calidad en **Equipo**. En **Horarios**, define para cada agente un horario diario de referencia y exactamente un día de descanso antes de habilitar Disponible. Las cuentas nuevas no tienen horario por defecto.
 
    Si ya existían perfiles antes de agregar usuario, `schema.sql` les asigna uno inicial con el formato `parte-del-correo_abcdef0`; el usuario también aparece en **Equipo**. Las cuentas nuevas reciben el usuario que se indique al crearlas.
 
@@ -119,7 +119,7 @@ Los gráficos presentan conteos por estado y métricas calculadas sobre los caso
 
 ## Zona horaria y reportes
 
-Los horarios se guardan como hora local del día de semana y la asignación/alertas usan `America/Lima`. Los instantes de llamadas y callbacks se almacenan como `timestamptz`. La exportación CSV indica el instante programado en UTC; la interfaz lo presenta en hora de Lima. PDF se genera desde el diálogo de impresión del navegador (**Imprimir → Guardar como PDF**).
+El horario de referencia se repite en los seis días laborales; el único día libre se bloquea, pero las horas configuradas no limitan cuándo se puede iniciar Disponible ni recibir asignaciones. Los contadores de Disponible (máximo 8 horas) y Break (máximo 60 minutos) se reinician cada día según `America/Lima`. Las alertas servidoras usan el cron configurado; si PostgREST aún no refleja las funciones nuevas, recarga su caché. Los instantes de llamadas y callbacks se almacenan como `timestamptz`. La exportación CSV de callbacks indica el instante programado en UTC; la interfaz lo presenta en hora de Lima. PDF se genera desde el diálogo de impresión del navegador (**Imprimir → Guardar como PDF**).
 
 ## Estructura
 

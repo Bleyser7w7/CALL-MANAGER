@@ -1,6 +1,5 @@
 import { fetchCallbacks, statusInfo, localDateTime } from "./callbacks.js";
 import { fetchAgents } from "./assignments.js";
-import { getSchedules } from "./schedules.js";
 
 const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -10,21 +9,9 @@ export async function renderOverview(profile, filters = {}) {
   const callbacks = await fetchCallbacks({ profile, filters });
   let team = [];
   let availability;
-  let nextBreak;
   if (profile.role === "agent") {
-    const weekdayText = new Intl.DateTimeFormat("en-US", { timeZone: "America/Lima", weekday: "short" })
-      .format(new Date());
-    const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekdayText);
-    const currentTime = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/Lima", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
-    }).format(new Date());
-    const currentMinutes = Number(currentTime.slice(0, 2)) * 60 + Number(currentTime.slice(3, 5));
-    const [users, scheduleRows] = await Promise.all([fetchAgents(), getSchedules(profile.id)]);
+    const users = await fetchAgents();
     availability = users.find(user => user.id === profile.id);
-    const todaySchedule = scheduleRows.find(row => row.weekday === weekday);
-    nextBreak = todaySchedule?.agent_breaks?.find(item =>
-      Number(item.start_time.slice(0, 2)) * 60 + Number(item.start_time.slice(3, 5)) > currentMinutes
-    );
   } else if (profile.role !== "quality") {
     team = await fetchAgents();
   }
@@ -38,10 +25,12 @@ export async function renderOverview(profile, filters = {}) {
     available: "Disponible", break: "Break", pause: "Pausa", bathroom: "Baño",
     training: "Capacitación", feedback: "Feedback"
   };
-  const agentAvailabilityLabel = availability?.activity_status === "available"
-    ? availability.available_now ? "Disponible" : availability.on_break ? "En pausa" : "No disponible"
-    : activityLabels[availability?.activity_status] || (availability?.on_break ? "En pausa"
-      : availability?.on_shift ? "No disponible" : "Fuera de turno");
+  const agentAvailabilityLabel = availability?.availability_limit_reached ? "Límite diario alcanzado; Pausa"
+    : availability?.is_rest_day ? "Día de descanso"
+    : !availability?.schedule_configured ? "Horario sin configurar"
+      : availability?.activity_status === "available"
+        ? availability.available_now ? "Disponible" : "No disponible"
+        : activityLabels[availability?.activity_status] || (availability?.on_shift ? "No disponible" : "Aún no inició");
   const stats = [
     ["Total de casos", callbacks.length, "En el periodo seleccionado"],
     ["Pendientes", (statuses.pending || 0) + (statuses.queued || 0) + (statuses.assigned || 0), "Requieren seguimiento"],
@@ -50,8 +39,8 @@ export async function renderOverview(profile, filters = {}) {
   ];
   if (profile.role !== "agent" && profile.role !== "quality") {
     const available = team.filter(user => user.available_now).length;
-    stats.push(["Agentes disponibles", available, "En turno y fuera de pausa"]);
-    stats.push(["Fuera de turno", team.filter(user => user.role === "agent" && !user.on_shift).length, "Sin turno activo"]);
+    stats.push(["Agentes disponibles", available, "Marcados Disponible en día laboral"]);
+    stats.push(["No disponibles", team.filter(user => user.role === "agent" && !user.available_now).length, "Pausa, descanso o aún no iniciaron"]);
   }
   const statHtml = stats.map((item, index) => `
     <article class="stat-card"><div class="stat-label">${item[0]}</div>
@@ -81,7 +70,7 @@ export async function renderOverview(profile, filters = {}) {
         <div class="setting-row"><span class="muted">Incumplidos</span><strong>${statuses.unfulfilled || 0}</strong></div>
         ${profile.role === "agent" ? `<div class="setting-row"><span class="muted">Disponibilidad</span>
           <strong>${agentAvailabilityLabel}</strong></div>
-          <div class="setting-row"><span class="muted">Próximo descanso</span><strong>${nextBreak ? `${nextBreak.start_time.slice(0, 5)} · ${escapeHtml(nextBreak.label)}` : "No programado"}</strong></div>` : ""}
+          <div class="setting-row"><span class="muted">Máximo Disponible</span><strong>8 horas por día</strong></div>` : ""}
       </article></div>
     <div class="section-heading"><h2>Próximos casos</h2><button class="button button-small" data-view="callbacks">Ver todos</button></div>
     <article class="panel table-wrap"><table class="data-table"><thead><tr><th>Caso</th><th>Cliente</th><th>Programado</th><th>Estado</th></tr></thead>

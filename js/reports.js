@@ -24,8 +24,7 @@ export async function exportCsv(profile, filters = {}) {
 
 export function exportAgentActivityCsv(rows) {
   const columns = [
-    ["full_name", "Agente"], ["shift_started_at", "Inicio de turno (UTC)"],
-    ["shift_ends_at", "Fin de turno (UTC)"], ["current_status", "Estado actual"],
+    ["full_name", "Agente"], ["shift_started_at", "Día de actividad (Lima)"], ["current_status", "Estado actual"],
     ["available_seconds", "Disponible (segundos)"], ["break_seconds", "Break (segundos)"],
     ["pause_seconds", "Pausa (segundos)"], ["bathroom_seconds", "Baño (segundos)"],
     ["training_seconds", "Capacitación (segundos)"], ["feedback_seconds", "Feedback (segundos)"]
@@ -37,9 +36,14 @@ export function exportAgentActivityCsv(rows) {
   const escape = value => `"${String(value ?? "").replaceAll('"', '""')}"`;
   const csv = [
     columns.map(([, label]) => escape(label)).join(","),
-    ...rows.map(row => columns.map(([key]) => escape(
-      key === "current_status" ? statusLabels[row[key]] || row[key] : row[key]
-    )).join(","))
+    ...rows.map(row => columns.map(([key]) => {
+      const value = key === "current_status" ? statusLabels[row[key]] || row[key]
+        : key === "shift_started_at" ? new Intl.DateTimeFormat("es-PE", {
+          timeZone: "America/Lima", dateStyle: "medium"
+        }).format(new Date(row[key]))
+          : row[key];
+      return escape(value);
+    }).join(","))
   ].join("\r\n");
   const url = URL.createObjectURL(new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a");

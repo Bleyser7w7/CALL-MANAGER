@@ -1,7 +1,7 @@
 import { isSupabaseConfigured, requireSupabase } from "./supabase.js";
 import { createCallback, fetchCallbacks, finishCall, startCall, assignCallback, closeCallback, statusInfo, localDateTime } from "./callbacks.js";
 import { fetchAgents } from "./assignments.js";
-import { getSchedules, saveBreak, saveSchedule } from "./schedules.js";
+import { getSchedules, saveDailySchedule } from "./schedules.js";
 import { fetchNotifications, markNotificationRead, notifyDesktop, subscribeNotifications } from "./notifications.js";
 import { exportAgentActivityCsv, exportCsv } from "./reports.js";
 import { renderOverview } from "./dashboard.js";
@@ -37,6 +37,7 @@ let agentActivityReportRows = [];
 
 const SESSION_STORAGE_KEY = "callback-manager-session-id";
 const AGENT_BREAK_LIMIT_SECONDS = 60 * 60;
+const AGENT_AVAILABILITY_LIMIT_SECONDS = 8 * 60 * 60;
 const AGENT_ACTIVITY_STATUSES = [
   ["available", "Disponible"], ["break", "Break"], ["pause", "Pausa"],
   ["bathroom", "Baño"], ["training", "Capacitación"], ["feedback", "Feedback"]
@@ -133,17 +134,25 @@ function formatActivityDuration(seconds) {
 function isValidAgentActivityStatus(data) {
   return data && typeof data.on_shift === "boolean"
     && (data.status === "off_shift" || Object.hasOwn(AGENT_ACTIVITY_LABELS, data.status))
-    && Number.isFinite(Number(data.break_seconds));
+    && typeof data.schedule_configured === "boolean"
+    && typeof data.rest_day === "boolean"
+    && typeof data.availability_limit_reached === "boolean"
+    && Number.isFinite(Number(data.break_seconds))
+    && Number.isFinite(Number(data.available_seconds));
 }
 
 function renderAgentActivityPanel() {
   if (profile.role !== "agent") return "";
   return `<section id="agent-activity-panel" class="panel agent-activity-panel">
     <div class="agent-activity-heading"><div><h2>Estado y tiempos</h2>
-      <p class="subtle">El tiempo de Break se acumula durante el turno. Límite: 1 hora.</p></div>
+      <p class="subtle">Disponible se acumula por día. Límite diario: 8 horas; Break: 1 hora.</p></div>
       <span id="agent-activity-current-status" class="pill gray">Consultando…</span></div>
-    <div class="agent-activity-counter"><span>Break utilizado</span>
-      <strong id="agent-activity-break-time">0 h 0 min 0 s</strong><span>/ 1 h 0 min 0 s</span></div>
+    <div class="agent-activity-counters">
+      <div class="agent-activity-counter"><span>Disponible utilizado</span>
+        <strong id="agent-activity-available-time">0 h 0 min 0 s</strong><span>/ 8 h 0 min 0 s</span></div>
+      <div class="agent-activity-counter"><span>Break utilizado</span>
+        <strong id="agent-activity-break-time">0 h 0 min 0 s</strong><span>/ 1 h 0 min 0 s</span></div>
+    </div>
     <div class="agent-activity-actions">${AGENT_ACTIVITY_STATUSES.map(([value, label]) =>
       `<button class="button button-small" data-action="set-agent-status" data-status="${value}" aria-pressed="false" disabled>${label}</button>`).join("")}</div>
     <p id="agent-activity-message" class="notice" role="status"></p>
@@ -156,26 +165,38 @@ function refreshAgentActivityDisplay() {
   const data = agentActivityStatus;
   const status = data?.status || "off_shift";
   const breakSeconds = Number(data?.break_seconds) || 0;
+  const availableSeconds = Number(data?.available_seconds) || 0;
   const elapsedBreakSeconds = status === "break" ? Math.max(0, (Date.now() - agentActivityFetchedAt) / 1000) : 0;
-  const usedSeconds = Math.floor(breakSeconds + elapsedBreakSeconds);
-  const overLimit = usedSeconds > AGENT_BREAK_LIMIT_SECONDS;
+  const elapsedAvailableSeconds = status === "available" ? Math.max(0, (Date.now() - agentActivityFetchedAt) / 1000) : 0;
+  const breakUsedSeconds = Math.floor(breakSeconds + elapsedBreakSeconds);
+  const availabilityUsedSeconds = Math.floor(availableSeconds + elapsedAvailableSeconds);
+  const breakOverLimit = breakUsedSeconds > AGENT_BREAK_LIMIT_SECONDS;
+  const availabilityLimitReached = data?.availability_limit_reached
+    || availabilityUsedSeconds >= AGENT_AVAILABILITY_LIMIT_SECONDS;
+  const overLimit = breakOverLimit || availabilityLimitReached;
   const statusPill = panel.querySelector("#agent-activity-current-status");
-  const timeDisplay = panel.querySelector("#agent-activity-break-time");
+  const breakTimeDisplay = panel.querySelector("#agent-activity-break-time");
+  const availableTimeDisplay = panel.querySelector("#agent-activity-available-time");
   const message = panel.querySelector("#agent-activity-message");
   panel.classList.toggle("over-limit", overLimit);
   statusPill.textContent = agentActivityLoading ? "Consultando…" : AGENT_ACTIVITY_LABELS[status] || "Fuera de turno";
   statusPill.className = `pill ${overLimit ? "red" : status === "available" ? "green" : status === "off_shift" ? "gray" : "yellow"}`;
-  timeDisplay.textContent = formatActivityDuration(usedSeconds);
+  availableTimeDisplay.textContent = formatActivityDuration(availabilityUsedSeconds);
+  breakTimeDisplay.textContent = formatActivityDuration(breakUsedSeconds);
   message.className = `notice${agentActivityError || overLimit ? " error" : ""}`;
   message.textContent = agentActivityError
     ? `No se pudo cargar el control de estados: ${agentActivityError}. Aplica database/schema.sql y database/policies.sql.`
-    : agentActivityLoading ? "Consultando tu turno programado…"
-      : !data?.on_shift ? "Fuera del turno programado. Los estados se habilitan al iniciar el turno."
-        : overLimit ? "Límite de Break superado. Se notificará a supervisión."
-          : "Selecciona un estado; el tiempo se registra automáticamente.";
+    : agentActivityLoading ? "Consultando tu estado y horario…"
+      : !data?.schedule_configured ? "Administración debe configurar tu horario diario y un único día de descanso."
+        : data.rest_day ? "Hoy es tu día de descanso. No puedes marcarte Disponible ni recibir asignaciones."
+          : availabilityLimitReached ? "Alcanzaste las 8 horas de Disponible. Tu estado pasa a Pausa y supervisión recibe una alerta."
+            : breakOverLimit ? "Superaste el límite de Break. Supervisión fue notificada."
+              : "Puedes marcarte Disponible en cualquier momento fuera de tu día de descanso; el horario es una referencia diaria.";
   panel.querySelectorAll("[data-action='set-agent-status']").forEach(button => {
     const active = button.dataset.status === status;
-    button.disabled = agentActivityLoading || agentActivityBusy || Boolean(agentActivityError) || !data?.on_shift;
+    const availableBlocked = button.dataset.status === "available"
+      && (!data?.schedule_configured || data.rest_day || availabilityLimitReached);
+    button.disabled = agentActivityLoading || agentActivityBusy || Boolean(agentActivityError) || availableBlocked;
     button.setAttribute("aria-pressed", String(active));
     button.classList.toggle("button-primary", active);
   });
@@ -246,7 +267,7 @@ function pageTitle() {
   return {
     overview: ["Panel general", "Vista rápida de las devoluciones de llamada"],
     callbacks: ["Casos", "Gestiona, asigna y registra cada devolución"],
-    schedules: ["Horarios", "Turnos y pausas de los agentes"],
+    schedules: ["Horarios", "Horario diario y descanso semanal de los agentes"],
     team: ["Equipo", "Usuarios y disponibilidad"],
     settings: ["Configuración", "Parámetros de operación y alertas"],
     history: ["Historial", "Intentos y resultados de tus llamadas"],
@@ -359,31 +380,41 @@ async function schedulesView() {
     selectedScheduleAgentId || agentsList[0]?.id;
   selectedScheduleAgentId = chosen || "";
   const rows = chosen ? await getSchedules(chosen) : [];
-  const byDay = new Map(rows.map(row => [row.weekday, row]));
+  const workingRows = rows.filter(row => row.is_working);
+  const restDays = rows.filter(row => !row.is_working);
+  const dailyTemplate = workingRows[0] || rows[0];
+  const restDay = restDays[0]?.weekday ?? 0;
+  const consistent = rows.length === 7 && workingRows.length === 6 && restDays.length === 1
+    && workingRows.every(row => row.start_time === dailyTemplate.start_time && row.end_time === dailyTemplate.end_time);
   if (profile.role === "agent") {
-    return `<section class="content-view"><div class="schedule-grid">${weekdays.map((day, weekday) => {
-      const row = byDay.get(weekday);
-      return `<article class="schedule-card"><h3>${day}</h3><div class="schedule-list">
-        <span>${row?.is_working ? `${row.start_time.slice(0, 5)} – ${row.end_time.slice(0, 5)}` : "Día libre"}</span>
-        ${row?.agent_breaks?.map(br => `<span class="subtle">${escapeHtml(br.label)} · ${br.start_time.slice(0, 5)}–${br.end_time.slice(0, 5)}</span>`).join("") || ""}
-      </div></article>`;
-    }).join("")}</div><p class="subtle">Zona horaria: America/Lima</p></section>`;
+    return `<section class="content-view"><article class="panel">
+      <div class="section-heading" style="margin-top:0"><div><h2>Horario diario</h2>
+        <span class="subtle">Se repite cada semana; puedes iniciar Disponible a cualquier hora, salvo tu día de descanso.</span></div></div>
+      ${consistent ? `<div class="setting-row"><span>Horario de referencia</span><strong>${dailyTemplate.start_time.slice(0, 5)} – ${dailyTemplate.end_time.slice(0, 5)}</strong></div>
+        <div class="setting-row"><span>Descanso semanal</span><strong>${weekdays[restDay]}</strong></div>`
+        : '<p class="notice error">Tu horario diario todavía no está configurado correctamente. Contacta a administración para definir las horas y un único día de descanso.</p>'}
+      <p class="subtle">Zona horaria: America/Lima. Las horas del horario no bloquean Disponible ni las asignaciones; el día de descanso sí.</p>
+    </article></section>`;
   }
-  const cards = weekdays.map((day, weekday) => {
-    const row = byDay.get(weekday);
-    return `<form class="schedule-card schedule-form" data-weekday="${weekday}" data-agent="${chosen || ""}">
-      <h3>${day}</h3><div class="schedule-list"><label class="field-label">Turno
-        <span class="inline"><input class="field" type="time" name="start_time" value="${row?.start_time?.slice(0, 5) || "09:00"}">
-        <span class="muted">—</span><input class="field" type="time" name="end_time" value="${row?.end_time?.slice(0, 5) || "18:00"}"></span></label>
-        <label class="inline"><input type="checkbox" name="is_working" ${row?.is_working ? "checked" : ""}> Día laboral</label>
-        <button class="button button-small" type="submit">Guardar turno</button>
-        ${row?.agent_breaks?.length ? `<div class="subtle">Pausas: ${row.agent_breaks.map(br => `${escapeHtml(br.label)} ${br.start_time.slice(0, 5)}–${br.end_time.slice(0, 5)}`).join(", ")}</div>` : ""}
-      </div></form>`;
-  }).join("");
   return `<section class="content-view"><div class="toolbar"><label class="field-label">Agente
     <select class="field-select" id="schedule-agent">${agentsList.map(item => `<option value="${item.id}" ${item.id === chosen ? "selected" : ""}>${escapeHtml(item.full_name)}</option>`).join("")}</select></label>
-    ${chosen ? '<button class="button button-small" data-action="add-break">Agregar pausa</button>' : ""}</div>
-    ${agentsList.length ? `<div class="schedule-grid">${cards}</div>` : '<div class="panel empty-state">No hay agentes. Crea usuarios de rol agente para configurar sus turnos.</div>'}</section>`;
+    </div>
+    ${agentsList.length ? `<article class="panel">
+      <div class="section-heading" style="margin-top:0"><div><h2>Horario diario recurrente</h2>
+        <span class="subtle">Configura un mismo horario de referencia para los días laborales y un solo día de descanso.</span></div></div>
+      ${chosen ? `<form id="daily-schedule-form" data-agent="${chosen}">
+        <div class="form-grid">
+          <label class="field-label">Hora de inicio<input class="field" type="time" name="start_time" value="${dailyTemplate?.start_time?.slice(0, 5) || "09:00"}" required></label>
+          <label class="field-label">Hora de fin<input class="field" type="time" name="end_time" value="${dailyTemplate?.end_time?.slice(0, 5) || "18:00"}" required></label>
+          <label class="field-label">Día de descanso<select class="field-select" name="rest_day" required>
+            ${weekdays.map((day, weekday) => `<option value="${weekday}" ${weekday === restDay ? "selected" : ""}>${day}</option>`).join("")}
+          </select></label>
+        </div>
+        <p class="subtle">El horario se repite a diario y es informativo: no restringe Disponible ni las asignaciones. El día de descanso bloquea Disponible y nuevas asignaciones. Límite de Disponible: 8 horas por día (hora de Lima).</p>
+        ${rows.length && !consistent ? '<p class="notice">Al guardar, se reemplazará la configuración semanal anterior por este horario diario y un único descanso.</p>' : ""}
+        <footer class="modal-footer"><button class="button button-primary">Guardar horario</button></footer>
+      </form>` : '<p class="empty-state">Selecciona un agente para configurar su horario.</p>'}
+    </article>` : '<div class="panel empty-state">No hay agentes. Crea usuarios de rol agente para configurar sus horarios.</div>'}</section>`;
 }
 
 async function teamView() {
@@ -392,11 +423,16 @@ async function teamView() {
   const rows = users.map(user => {
     const activityLabel = AGENT_ACTIVITY_LABELS[user.activity_status];
     const status = user.role === "quality" ? "Calidad"
+      : user.availability_limit_reached ? "Límite diario alcanzado"
+      : user.is_rest_day ? "Día de descanso"
+        : !user.schedule_configured ? "Horario sin configurar"
       : activityLabel && user.activity_status !== "available" ? activityLabel
         : user.available_now ? "Disponible" : user.on_break ? "En pausa"
           : user.on_shift ? "No disponible" : "Fuera de turno";
     const statusColor = user.role === "quality" ? "blue"
-      : status === "Disponible" ? "green" : status === "Fuera de turno" ? "gray" : "yellow";
+      : status === "Límite diario alcanzado" ? "red"
+        : status === "Disponible" ? "green"
+          : ["Fuera de turno", "Día de descanso", "Horario sin configurar"].includes(status) ? "gray" : "yellow";
     return `<tr><td><strong>${escapeHtml(user.full_name)}</strong></td><td>${escapeHtml(user.username)}</td><td>${escapeHtml(user.email)}</td>
       <td>${escapeHtml(user.role_label || user.role)}</td><td><span class="pill ${statusColor}">${escapeHtml(status)}</span></td></tr>`;
   }).join("");
@@ -438,21 +474,25 @@ async function teamView() {
 function renderAgentActivityReport(rows) {
   const statusRows = rows.map(row => {
     const breakSeconds = Number(row.break_seconds);
-    const overLimit = breakSeconds > AGENT_BREAK_LIMIT_SECONDS;
+    const availableSeconds = Number(row.available_seconds);
+    const overLimit = breakSeconds > AGENT_BREAK_LIMIT_SECONDS
+      || availableSeconds >= AGENT_AVAILABILITY_LIMIT_SECONDS;
     const status = AGENT_ACTIVITY_LABELS[row.current_status] || "Fuera de turno";
     return `<tr class="${overLimit ? "agent-activity-over-limit" : ""}">
       <td><strong>${escapeHtml(row.full_name)}</strong></td>
-      <td>${escapeHtml(localDateTime(row.shift_started_at))}<div class="subtle">${escapeHtml(localDateTime(row.shift_ends_at))}</div></td>
+      <td>${escapeHtml(new Intl.DateTimeFormat("es-PE", {
+        timeZone: "America/Lima", dateStyle: "medium"
+      }).format(new Date(row.shift_started_at)))}</td>
       <td><span class="pill ${row.current_status === "available" ? "green" : row.current_status === "off_shift" ? "gray" : "yellow"}">${escapeHtml(status)}</span></td>
-      <td>${formatActivityDuration(row.available_seconds)}</td>
-      <td><span class="${overLimit ? "agent-activity-over-limit-label" : ""}">${formatActivityDuration(breakSeconds)}</span></td>
+      <td><span class="${availableSeconds >= AGENT_AVAILABILITY_LIMIT_SECONDS ? "agent-activity-over-limit-label" : ""}">${formatActivityDuration(availableSeconds)}</span></td>
+      <td><span class="${breakSeconds > AGENT_BREAK_LIMIT_SECONDS ? "agent-activity-over-limit-label" : ""}">${formatActivityDuration(breakSeconds)}</span></td>
       <td>${formatActivityDuration(row.pause_seconds)}</td><td>${formatActivityDuration(row.bathroom_seconds)}</td>
       <td>${formatActivityDuration(row.training_seconds)}</td><td>${formatActivityDuration(row.feedback_seconds)}</td></tr>`;
   }).join("");
-  return `<div class="section-heading"><div><h2>Estados y tiempos por turno</h2>
-    <span class="subtle">El Break se marca en rojo al superar 1 hora.</span></div>
+  return `<div class="section-heading"><div><h2>Estados y tiempos por día</h2>
+    <span class="subtle">Disponible se marca en rojo al alcanzar 8 horas; Break, al superar 1 hora.</span></div>
     <button class="button button-primary button-small" data-action="export-agent-activity-csv" ${rows.length ? "" : "disabled"}>Exportar CSV</button></div>
-    <article class="panel table-wrap"><table class="data-table"><thead><tr><th>Agente</th><th>Turno (hora local)</th>
+    <article class="panel table-wrap"><table class="data-table"><thead><tr><th>Agente</th><th>Día (hora de Lima)</th>
       <th>Estado actual</th><th>Disponible</th><th>Break</th><th>Pausa</th><th>Baño</th><th>Capacitación</th><th>Feedback</th></tr></thead>
       <tbody>${statusRows || '<tr><td colspan="9" class="empty-state">No hay actividad registrada para este rango.</td></tr>'}</tbody></table></article>`;
 }
@@ -844,6 +884,9 @@ function assignmentModal(callbackId) {
       const agentOptions = agents.filter(item => item.role === "agent")
         .map(item => `<option value="${item.id}" ${item.available_now ? "" : "disabled"}>${escapeHtml(item.full_name)}${item.available_now ? " · Disponible"
           : item.on_break ? " · En pausa"
+            : item.is_rest_day ? " · Día de descanso"
+              : !item.schedule_configured ? " · Horario sin configurar"
+                  : item.availability_limit_reached ? " · Límite diario alcanzado"
             : item.activity_status ? ` · ${escapeHtml(AGENT_ACTIVITY_LABELS[item.activity_status] || item.activity_status)}`
               : item.on_shift ? " · No disponible" : " · Fuera de turno"}</option>`).join("");
       return `<div class="modal-backdrop" data-action="dismiss-modal"><section class="modal" role="dialog" aria-modal="true">
@@ -851,23 +894,9 @@ function assignmentModal(callbackId) {
         <form id="assign-form" data-id="${callbackId}"><div class="form-grid">
           <label class="field-label">Método<select class="field-select" name="mode"><option value="auto">Automático · equilibrar carga</option><option value="manual">Manual</option></select></label>
           <label class="field-label">Agente<select class="field-select" name="agent_id"><option value="">Selecciona un agente</option>${agentOptions}</select></label>
-        </div><div class="notice" id="modal-message">Solo se asignará a agentes en turno, marcados como Disponible y fuera de sus pausas.</div>
+        </div><div class="notice" id="modal-message">Solo se asignará a agentes marcados como Disponible, que no estén en su día de descanso y no hayan alcanzado 8 horas hoy.</div>
         <footer class="modal-footer"><button class="button" type="button" data-action="close-modal">Cancelar</button>
           <button class="button button-primary">Asignar caso</button></footer></form></section></div>`;
-}
-
-function breakModal(agentId) {
-  return `<div class="modal-backdrop" data-action="dismiss-modal"><section class="modal" role="dialog" aria-modal="true">
-    <header class="modal-header"><h2>Agregar pausa</h2><button class="text-button" data-action="close-modal">✕</button></header>
-    <form id="break-form" data-agent="${agentId}"><div class="form-grid">
-      <label class="field-label">Día<select class="field-select" name="weekday" required>${weekdays.map((day, index) =>
-        `<option value="${index}">${day}</option>`).join("")}</select></label>
-      <label class="field-label">Nombre<input class="field" name="label" value="Almuerzo" required maxlength="80"></label>
-      <label class="field-label">Hora de inicio<input class="field" name="start_time" type="time" required></label>
-      <label class="field-label">Hora de fin<input class="field" name="end_time" type="time" required></label>
-    </div><div class="notice" id="modal-message"></div><footer class="modal-footer">
-      <button class="button" type="button" data-action="close-modal">Cancelar</button>
-      <button class="button button-primary">Guardar pausa</button></footer></form></section></div>`;
 }
 
 async function showNotificationList() {
@@ -978,10 +1007,6 @@ async function runAction(action, target) {
     root.insertAdjacentHTML("beforeend", userImportModal());
   } else if (action === "download-user-template") {
     await downloadUserTemplate();
-  } else if (action === "add-break") {
-    const selected = document.querySelector("#schedule-agent")?.value;
-    if (!selected) throw new Error("Selecciona un agente para configurar su pausa.");
-    root.insertAdjacentHTML("beforeend", breakModal(selected));
   } else if (action === "view") {
     currentView = target.dataset.view;
     renderShell();
@@ -1047,19 +1072,13 @@ root?.addEventListener("submit", async event => {
         const selectedAgent = agents.find(item => item.id === agentId);
         if (!selectedAgent?.available_now) {
           throw new Error(selectedAgent
-            ? `${selectedAgent.full_name} no está disponible. Debe estar en turno y marcado como Disponible.`
+            ? `${selectedAgent.full_name} no está disponible hoy. Debe estar en un día laboral, marcado Disponible y bajo el límite diario de 8 horas.`
             : "Actualiza la lista de agentes e inténtalo de nuevo.");
         }
       }
       const result = await assignCallback(form.dataset.id, agentId);
       form.closest(".modal-backdrop").remove();
       toast(result?.status === "queued" ? "No hay agentes disponibles; el caso quedó en cola." : "Caso asignado.");
-      await renderView();
-    } else if (form.id === "break-form") {
-      const values = Object.fromEntries(new FormData(form));
-      await saveBreak({ ...values, agent_id: form.dataset.agent });
-      form.closest(".modal-backdrop").remove();
-      toast("Pausa guardada.");
       await renderView();
     } else if (form.id === "settings-form") {
       const values = Object.fromEntries(new FormData(form));
@@ -1084,17 +1103,17 @@ root?.addEventListener("submit", async event => {
       await renderView();
     } else if (form.id === "user-import-form") {
       await createImportedUsers(form);
-    } else if (form.matches(".schedule-form")) {
+    } else if (form.id === "daily-schedule-form") {
       if (!form.dataset.agent) throw new Error("Selecciona un agente.");
       const values = new FormData(form);
-      await saveSchedule({
+      await saveDailySchedule({
         agent_id: form.dataset.agent,
-        weekday: form.dataset.weekday,
         start_time: values.get("start_time"),
         end_time: values.get("end_time"),
-        is_working: values.get("is_working") === "on"
+        rest_day: values.get("rest_day")
       });
-      toast("Turno guardado.");
+      toast("Horario diario guardado.");
+      await renderView();
     }
   } catch (error) {
     const notice = form.querySelector("#modal-message, #user-import-message");
