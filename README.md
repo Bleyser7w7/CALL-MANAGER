@@ -15,7 +15,7 @@ GitHub Pages está publicado. Para usar la dirección gratuita de GitHub Pages e
 - Rol Calidad de solo lectura para revisar callbacks, asignaciones, intentos e informes, sin permisos para crear, asignar o cerrar casos.
 - Registro de inicio, actividad y salida de sesión por usuario; administración y supervisión pueden consultar las últimas 100 sesiones desde **Equipo**.
 - Inicio de sesión con usuario único; el correo se conserva para recuperar la contraseña y recibir comunicaciones de la cuenta.
-- Registro de callbacks con responsable, programación, prioridad y datos del cliente. Los agentes también pueden crear casos, elegir supervisor responsable y dejarlos pendientes para que supervisión los asigne o reasigne a un agente.
+- Registro de callbacks con responsable, programación, prioridad y datos del cliente. Los agentes también pueden crear casos y elegir supervisor responsable; ese supervisor recibe un aviso en la campana y puede asignar o reasignar el caso a un agente.
 - Al guardar cualquier resultado de llamada, el intento queda registrado y el caso se marca como Cumplido; las notas y el resultado elegido conservan el detalle de la gestión.
 - Asignación manual o automática con carga equilibrada; el servidor solo asigna a agentes marcados como Disponibles, con un horario diario válido, fuera de su día de descanso y con menos de 8 horas acumuladas ese día. Las horas de inicio y fin del horario son una referencia y no limitan la disponibilidad.
 - Inicio de llamada y registro de intentos mediante funciones SQL que comprueban rol y asignación.

@@ -618,6 +618,34 @@ drop trigger if exists callbacks_activity_log on public.callbacks;
 create trigger callbacks_activity_log after insert or update of status on public.callbacks
   for each row execute procedure public.log_callback_changes();
 
+create or replace function public.notify_supervisor_of_agent_case()
+returns trigger language plpgsql security definer set search_path = public
+as $$
+declare
+  v_agent_name text;
+begin
+  if exists (
+    select 1 from public.profiles where id = new.created_by and role = 'agent'
+  ) then
+    select full_name into v_agent_name
+    from public.profiles where id = new.created_by;
+    insert into public.notifications(
+      user_id, callback_id, notification_type, title, message, scheduled_at
+    ) values (
+      new.supervisor_id, new.id, 'agent_case_submitted', 'Nuevo caso pendiente de asignación',
+      coalesce(v_agent_name, 'Un agente') || ' registró el caso ' || new.case_number
+        || '. Asígnalo a un agente para gestionarlo.',
+      new.scheduled_at
+    )
+    on conflict do nothing;
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists callbacks_notify_agent_case on public.callbacks;
+create trigger callbacks_notify_agent_case after insert on public.callbacks
+  for each row execute procedure public.notify_supervisor_of_agent_case();
+
 create or replace function public.assign_callback(p_callback_id uuid, p_agent_id uuid default null)
 returns jsonb language plpgsql security definer set search_path = public
 as $$
