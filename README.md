@@ -11,6 +11,9 @@ GitHub Pages está publicado. Para usar la dirección gratuita de GitHub Pages e
 ## Funcionalidad incluida
 
 - Inicio/cierre de sesión, recuperación de contraseña y vistas protegidas por rol.
+- Pie de página con el aviso `© Bleyser7w7 (2026). All rights reserved`.
+- Rol Calidad de solo lectura para revisar callbacks, asignaciones, intentos e informes, sin permisos para crear, asignar o cerrar casos.
+- Registro de inicio, actividad y salida de sesión por usuario; administración y supervisión pueden consultar las últimas 100 sesiones desde **Equipo**.
 - Inicio de sesión con usuario único; el correo se conserva para recuperar la contraseña y recibir comunicaciones de la cuenta.
 - Registro de callbacks con responsable, programación, prioridad y datos del cliente.
 - Asignación manual o automática con carga equilibrada; el servidor solo asigna durante el turno y fuera de pausas. Sin agente disponible, el caso queda en cola y se avisa a supervisión.
@@ -19,6 +22,11 @@ GitHub Pages está publicado. Para usar la dirección gratuita de GitHub Pages e
 - Alertas servidoras a 10 y 5 minutos, marcación de retraso 10 minutos después y aviso de casos pendientes al cierre del turno.
 - Reportes filtrables, descarga CSV e impresión del navegador para guardar como PDF.
 - Creación de usuarios por una Edge Function protegida; nunca requiere la clave de servicio en el navegador.
+- Importación masiva de usuarios para administradores desde archivos `.xlsx`, `.xls` o `.csv`, con validación por fila y resultados de altas. La primera hoja requiere las columnas `nombre`, `usuario`, `correo` y `contraseña`; `rol` es opcional, acepta `agent`, `quality`, `supervisor` o `admin` y, si falta o queda vacío, se interpreta como `agent`. En **Equipo → Importar desde Excel** se puede descargar una plantilla.
+
+Las contraseñas del archivo se procesan en el navegador y se envían a la Edge Function protegida de Supabase mediante HTTPS; no se incluyen en el informe de resultados. Usa contraseñas temporales, protege el archivo y elimínalo cuando termine la carga. Las filas válidas se crean individualmente: los errores de una fila no cancelan las demás.
+
+El tiempo de sesión se actualiza cada minuto. El cierre de sesión normal registra la salida; si se cierra el navegador inesperadamente, se usa la última actividad registrada y se marca como cierre estimado al reconectar. Los horarios de turnos existentes siguen siendo independientes.
 
 Los gráficos presentan conteos por estado y métricas calculadas sobre los casos recuperados. No se declaran como fuentes de datos los indicadores que aún no tienen integración propia.
 
@@ -30,7 +38,7 @@ Los gráficos presentan conteos por estado y métricas calculadas sobre los caso
 
 ## Configuración
 
-1. En Supabase, abre **SQL Editor** y ejecuta, en este orden, `database/schema.sql`, `database/policies.sql` y `database/seed.sql`.
+1. En Supabase, abre **SQL Editor** y ejecuta, en este orden, `database/schema.sql`, `database/policies.sql` y `database/seed.sql`. Al actualizar una instalación existente, vuelve a ejecutar los dos primeros archivos para habilitar el rol Calidad y el registro de sesiones.
 2. En `js/config.js`, reemplaza `url` y `anonKey` por la URL del proyecto y la clave pública `anon`/publishable. Esta clave es pública por diseño; RLS es la barrera de seguridad. No pegues la `service_role` en ningún archivo del navegador.
 3. En **Authentication → URL Configuration**, configura el dominio de despliegue y su URL de redirección. En producción, desactiva el registro público (`Allow new users to sign up`); las cuentas se crean desde la interfaz de administración.
 4. Instala/inicia sesión con Supabase CLI y enlaza el proyecto:
@@ -60,6 +68,8 @@ Los gráficos presentan conteos por estado y métricas calculadas sobre los caso
    supabase functions deploy process-alerts
    ```
 
+   Tras actualizar esta versión, vuelve a desplegar `create-user` para permitir altas de usuarios de Calidad.
+
 7. Configura el primer administrador:
    - Crea una cuenta desde **Authentication → Users**.
    - Copia su UUID y ejecuta en SQL Editor:
@@ -70,7 +80,7 @@ Los gráficos presentan conteos por estado y métricas calculadas sobre los caso
    delete from public.supervisors where id = 'UUID-DEL-USUARIO';
    ```
 
-   A partir de ahí el administrador puede dar de alta agentes y supervisores en **Equipo**. Define sus turnos en **Horarios** antes de asignarles casos. Las cuentas nuevas no tienen turnos por defecto.
+   A partir de ahí el administrador puede dar de alta agentes, supervisores y usuarios de Calidad en **Equipo**. Define los turnos de agentes en **Horarios** antes de asignarles casos. Las cuentas nuevas no tienen turnos por defecto.
 
    Si ya existían perfiles antes de agregar usuario, `schema.sql` les asigna uno inicial con el formato `parte-del-correo_abcdef0`; el usuario también aparece en **Equipo**. Las cuentas nuevas reciben el usuario que se indique al crearlas.
 
@@ -102,7 +112,7 @@ Los gráficos presentan conteos por estado y métricas calculadas sobre los caso
    - En **Custom domain**, borra `call-manager.me` y guarda el cambio. No necesitas configurar ningún DNS ni comprar un dominio.
    - La URL gratuita tendrá el formato `https://USUARIO.github.io/REPOSITORIO/`; copia la dirección exacta que GitHub muestra en **Settings → Pages**. Para este proyecto debería ser `https://Bleyser7w7.github.io/CALL-MANAGER/`.
 
-10. En Supabase, abre **Authentication → URL Configuration** y establece como **Site URL** la URL gratuita que muestra GitHub Pages. Agrega también como **Redirect URL** esa misma URL seguida de `login.html`, por ejemplo `https://Bleyser7w7.github.io/CALL-MANAGER/login.html`. Guarda los cambios y prueba el inicio y la recuperación de contraseña. Prueba los tres roles, RLS, asignación, pausas, cron y notificaciones antes de cargar datos reales.
+10. En Supabase, abre **Authentication → URL Configuration** y establece como **Site URL** la URL gratuita que muestra GitHub Pages. Agrega también como **Redirect URL** esa misma URL seguida de `login.html`, por ejemplo `https://Bleyser7w7.github.io/CALL-MANAGER/login.html`. Guarda los cambios y prueba el inicio y la recuperación de contraseña. Prueba los cuatro roles, los permisos de solo lectura de Calidad, RLS, asignación, pausas, cron y notificaciones antes de cargar datos reales.
 
 ## Zona horaria y reportes
 

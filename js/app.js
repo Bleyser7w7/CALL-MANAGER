@@ -20,6 +20,14 @@ let callbackFilters = {};
 let selectedScheduleAgentId = "";
 let realtimeChannel;
 let notificationsChannel;
+let userImportEntries = null;
+let userImportIssues = [];
+let xlsxModulePromise;
+let activeSessionKey = "";
+let sessionHeartbeatTimer;
+let sessionTrackingWarningShown = false;
+
+const SESSION_STORAGE_KEY = "callback-manager-session-id";
 
 function toast(message, type = "success") {
   const node = document.createElement("div");
@@ -29,8 +37,91 @@ function toast(message, type = "success") {
   window.setTimeout(() => node.remove(), 4200);
 }
 
+function createSessionKey() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+async function startSessionTracking() {
+  let sessionKey = sessionStorage.getItem(SESSION_STORAGE_KEY);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionKey || "")) {
+    sessionKey = createSessionKey();
+    sessionStorage.setItem(SESSION_STORAGE_KEY, sessionKey);
+  }
+  const { error } = await client.rpc("start_user_session", { p_client_session_id: sessionKey });
+  if (error) throw error;
+  activeSessionKey = sessionKey;
+  sessionTrackingWarningShown = false;
+  window.clearInterval(sessionHeartbeatTimer);
+  sessionHeartbeatTimer = window.setInterval(updateSessionHeartbeat, 60_000);
+}
+
+async function updateSessionHeartbeat() {
+  refreshSessionDurationDisplays();
+  if (!activeSessionKey) return;
+  try {
+    const { error } = await client.rpc("heartbeat_user_session", { p_client_session_id: activeSessionKey });
+    if (error) throw error;
+    sessionTrackingWarningShown = false;
+  } catch (error) {
+    if (!sessionTrackingWarningShown) {
+      toast(`No se pudo actualizar el tiempo de sesión: ${error.message}`, "error");
+      sessionTrackingWarningShown = true;
+    }
+  }
+}
+
+async function endSessionTracking(reason) {
+  if (!activeSessionKey) return;
+  const { error } = await client.rpc("end_user_session", {
+    p_client_session_id: activeSessionKey,
+    p_reason: reason
+  });
+  if (error) throw error;
+  activeSessionKey = "";
+  window.clearInterval(sessionHeartbeatTimer);
+  sessionHeartbeatTimer = null;
+}
+
+function endSessionOnPageHide() {
+  if (!activeSessionKey) return;
+  const sessionKey = activeSessionKey;
+  activeSessionKey = "";
+  window.clearInterval(sessionHeartbeatTimer);
+  sessionHeartbeatTimer = null;
+  client.rpc("end_user_session", { p_client_session_id: sessionKey, p_reason: "pagehide" })
+    .then(({ error }) => {
+      if (error) console.error("No se pudo registrar el cierre de sesión:", error.message);
+    })
+    .catch(error => console.error("No se pudo registrar el cierre de sesión:", error));
+}
+
+function formatSessionDuration(milliseconds) {
+  const minutes = Math.max(0, Math.floor(milliseconds / 60_000));
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor(minutes % 1440 / 60);
+  const remainingMinutes = minutes % 60;
+  return days ? `${days} d ${hours} h ${remainingMinutes} min` : `${hours} h ${remainingMinutes} min`;
+}
+
+function refreshSessionDurationDisplays() {
+  const now = Date.now();
+  document.querySelectorAll("[data-session-start]").forEach(element => {
+    const start = Number(element.dataset.sessionStart);
+    const end = element.dataset.sessionActive === "true" ? now : Number(element.dataset.sessionEnd);
+    if (Number.isFinite(start) && Number.isFinite(end)) {
+      element.textContent = formatSessionDuration(end - start);
+    }
+  });
+}
+
 function getRoleUrl(role) {
-  return role === "admin" ? "admin.html" : role === "agent" ? "dashboard-agent.html" : "dashboard-supervisor.html";
+  return role === "admin" ? "admin.html" : role === "agent" ? "dashboard-agent.html"
+    : role === "quality" ? "dashboard-quality.html" : "dashboard-supervisor.html";
 }
 
 function pageTitle() {
@@ -47,8 +138,10 @@ function pageTitle() {
 
 function navItems() {
   const items = [["overview", "◫", "Resumen"], ["callbacks", "▤", "Casos"]];
-  if (profile.role !== "agent") items.push(["schedules", "◷", "Horarios"], ["team", "♙", "Equipo"]);
-  else items.push(["schedules", "◷", "Horario"], ["history", "↺", "Historial"]);
+  if (profile.role === "admin" || profile.role === "supervisor") {
+    items.push(["schedules", "◷", "Horarios"], ["team", "♙", "Equipo"]);
+  } else if (profile.role === "agent") items.push(["schedules", "◷", "Horario"], ["history", "↺", "Historial"]);
+  else if (profile.role === "quality") items.push(["history", "↺", "Historial"]);
   if (profile.role === "admin") items.push(["settings", "⚙", "Ajustes"]);
   items.push(["reports", "▥", "Reportes"]);
   return items;
@@ -66,8 +159,9 @@ function renderShell() {
     <main class="main-area"><header class="topbar"><div><p class="eyebrow">${escapeHtml(profile.role_label.toUpperCase())}</p><h1 class="page-title">${title}</h1><p class="page-subtitle">${subtitle}</p></div>
       <div class="top-actions"><button class="button button-small" data-action="enable-desktop">Activar avisos</button>
       <button class="button button-small" data-action="show-notifications">Avisos <span id="notification-count"></span></button>
-      ${profile.role !== "agent" && currentView === "callbacks" ? '<button class="button button-primary button-small" data-action="new-callback">+ Nuevo caso</button>' : ""}</div></header>
-      <div id="view-container"><div class="empty-state">Cargando datos…</div></div></main></div>`;
+      ${["admin", "supervisor"].includes(profile.role) && currentView === "callbacks" ? '<button class="button button-primary button-small" data-action="new-callback">+ Nuevo caso</button>' : ""}</div></header>
+      <div id="view-container"><div class="empty-state">Cargando datos…</div></div>
+      <footer class="app-footer">© Bleyser7w7 (2026). All rights reserved</footer></main></div>`;
 }
 
 function callbackToolbar() {
@@ -85,7 +179,7 @@ function callbackToolbar() {
       `<option value="${value}" ${callbackFilters.status === value ? "selected" : ""}>${label}</option>`).join("")}</select>
     <input class="field" type="date" data-filter="from" value="${from}" aria-label="Fecha inicial">
     <input class="field" type="date" data-filter="to" value="${to}" aria-label="Fecha final">
-    ${profile.role === "admin" || profile.role === "supervisor" ? `<select class="field-select" data-filter="agentId"><option value="">Todos los agentes</option>${agentOptions}</select>` : ""}
+    ${["admin", "supervisor", "quality"].includes(profile.role) ? `<select class="field-select" data-filter="agentId"><option value="">Todos los agentes</option>${agentOptions}</select>` : ""}
     ${profile.role !== "agent" ? `<select class="field-select" data-filter="supervisorId"><option value="">Todos los supervisores</option>${supervisorOptions}</select>` : ""}
     <button class="button button-small" data-action="apply-filters">Filtrar</button>
     <button class="button button-small" data-action="clear-filters">Limpiar</button></div>`;
@@ -99,7 +193,7 @@ async function callbacksView() {
   const body = rows.map(row => {
     const assignedTo = row.assignment?.profiles?.full_name || "Sin asignar";
     const canCall = profile.role === "agent" && ["assigned", "pending", "due_soon", "overdue", "rescheduled"].includes(row.status);
-    const canAssign = profile.role !== "agent" && !["completed", "cancelled", "unfulfilled"].includes(row.status);
+    const canAssign = ["admin", "supervisor"].includes(profile.role) && !["completed", "cancelled", "unfulfilled"].includes(row.status);
     const actions = [
       canCall ? `<button class="button button-small button-primary" data-action="start-call" data-id="${row.id}">Iniciar llamada</button>` : "",
       canAssign ? `<button class="button button-small" data-action="assign" data-id="${row.id}">Asignar</button>` : "",
@@ -176,18 +270,47 @@ async function schedulesView() {
 async function teamView() {
   const users = await fetchAgents();
   teamMembers = users;
-  const rows = users.map(user => `<tr><td><strong>${escapeHtml(user.full_name)}</strong></td><td>${escapeHtml(user.username)}</td><td>${escapeHtml(user.email)}</td>
-    <td>${escapeHtml(user.role_label || user.role)}</td><td><span class="pill ${user.available_now ? "green" : "yellow"}">${user.available_now ? "En turno" : user.on_break ? "En pausa" : user.on_shift ? "No disponible" : "Fuera de turno"}</span></td></tr>`).join("");
+  const rows = users.map(user => {
+    const status = user.role === "quality" ? "Calidad" : user.available_now ? "En turno"
+      : user.on_break ? "En pausa" : user.on_shift ? "No disponible" : "Fuera de turno";
+    return `<tr><td><strong>${escapeHtml(user.full_name)}</strong></td><td>${escapeHtml(user.username)}</td><td>${escapeHtml(user.email)}</td>
+      <td>${escapeHtml(user.role_label || user.role)}</td><td><span class="pill ${user.role === "quality" ? "blue" : user.available_now ? "green" : "yellow"}">${status}</span></td></tr>`;
+  }).join("");
+  const { data: sessions, error } = await client.from("user_sessions")
+    .select("id,user_id,started_at,last_seen_at,ended_at,end_reason")
+    .order("started_at", { ascending: false }).limit(100);
+  if (error) throw error;
+  const usersById = new Map(users.map(user => [user.id, user]));
+  const sessionRows = (sessions || []).map(session => {
+    const user = usersById.get(session.user_id);
+    const lastSeen = Date.parse(session.last_seen_at);
+    const isStale = !session.ended_at && Date.now() - lastSeen > 2 * 60_000;
+    const finish = session.ended_at ? Date.parse(session.ended_at) : isStale ? lastSeen : Date.now();
+    const status = session.ended_at
+      ? session.end_reason === "inactive" ? "Cierre estimado" : session.end_reason === "pagehide" ? "Pestaña cerrada" : "Cerrada"
+      : isStale ? "Sin actividad" : "Activa";
+    const endTime = session.ended_at ? localDateTime(session.ended_at) : isStale ? localDateTime(session.last_seen_at) : "Sesión abierta";
+    return `<tr><td><strong>${escapeHtml(user?.full_name || "Usuario")}</strong><div class="subtle">${escapeHtml(user?.role_label || "")}</div></td>
+      <td>${escapeHtml(localDateTime(session.started_at))}</td><td>${escapeHtml(endTime)}</td>
+      <td><span data-session-start="${Date.parse(session.started_at)}" ${!session.ended_at && !isStale
+        ? 'data-session-active="true"' : `data-session-end="${finish}"`}>${escapeHtml(formatSessionDuration(finish - Date.parse(session.started_at)))}</span></td>
+      <td>${escapeHtml(status)}</td></tr>`;
+  }).join("");
   return `<section class="content-view">${profile.role === "admin" ? `<div class="toolbar"><button class="button button-primary button-small" data-action="new-user">+ Crear usuario</button>
-    <span class="subtle">El alta segura se realiza en el servidor mediante una Edge Function.</span></div>` : ""}
+    <button class="button button-small" data-action="new-user-import">Importar desde Excel</button>
+    <span class="subtle">Alta segura mediante una Edge Function. La plantilla incluye las columnas requeridas.</span></div>` : ""}
     <article class="panel table-wrap"><table class="data-table"><thead><tr><th>Nombre</th><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="5" class="empty-state">No hay usuarios registrados.</td></tr>'}</tbody></table></article></section>`;
+      <tbody>${rows || '<tr><td colspan="5" class="empty-state">No hay usuarios registrados.</td></tr>'}</tbody></table></article>
+    <div class="section-heading"><h2>Tiempo de sesión por usuario</h2><span class="subtle">Últimas 100 sesiones; las pestañas sin cierre muestran su última actividad.</span></div>
+    <article class="panel table-wrap"><table class="data-table"><thead><tr><th>Usuario</th><th>Inicio</th><th>Fin / actividad</th><th>Duración</th><th>Estado</th></tr></thead>
+      <tbody>${sessionRows || '<tr><td colspan="5" class="empty-state">Aún no hay sesiones registradas.</td></tr>'}</tbody></table></article></section>`;
 }
 
 async function historyView() {
-  const { data: attempts, error } = await client.from("callback_attempts")
-    .select("id,callback_id,outcome,notes,attempted_at")
-    .eq("agent_id", profile.id).order("attempted_at", { ascending: false }).limit(200);
+  let attemptsQuery = client.from("callback_attempts").select("id,callback_id,agent_id,outcome,notes,attempted_at")
+    .order("attempted_at", { ascending: false }).limit(200);
+  if (profile.role === "agent") attemptsQuery = attemptsQuery.eq("agent_id", profile.id);
+  const { data: attempts, error } = await attemptsQuery;
   if (error) throw error;
   const callbackIds = [...new Set((attempts || []).map(attempt => attempt.callback_id))];
   const { data: cases, error: casesError } = callbackIds.length
@@ -265,6 +388,10 @@ async function reportsView() {
 }
 
 async function renderView() {
+  if (profile.role === "quality" && ["schedules", "team", "settings"].includes(currentView)) {
+    currentView = "overview";
+    renderShell();
+  }
   const container = document.querySelector("#view-container");
   if (!container) return;
   container.innerHTML = '<div class="panel empty-state">Cargando datos…</div>';
@@ -289,7 +416,7 @@ function renderShellHeader() {
   const actions = header.querySelector(".top-actions");
   if (actions) {
     const create = actions.querySelector('[data-action="new-callback"]');
-    if (currentView === "callbacks" && profile.role !== "agent" && !create) {
+    if (currentView === "callbacks" && ["admin", "supervisor"].includes(profile.role) && !create) {
       actions.insertAdjacentHTML("beforeend", '<button class="button button-primary button-small" data-action="new-callback">+ Nuevo caso</button>');
     } else if (currentView !== "callbacks") create?.remove();
   }
@@ -313,10 +440,209 @@ function userModal() {
       <label class="field-label">Usuario<input class="field" name="username" required minlength="3" maxlength="32" pattern="[a-z0-9][a-z0-9._-]{2,31}" autocapitalize="none" spellcheck="false"></label>
       <label class="field-label">Correo electrónico<input class="field" name="email" type="email" required></label>
       <label class="field-label">Contraseña temporal<input class="field" name="password" type="password" required minlength="10" autocomplete="new-password"></label>
-      <label class="field-label">Rol<select class="field-select" name="role"><option value="agent">Agente</option><option value="supervisor">Supervisor</option><option value="admin">Administrador</option></select></label></div>
+      <label class="field-label">Rol<select class="field-select" name="role"><option value="agent">Agente</option><option value="quality">Calidad</option><option value="supervisor">Supervisor</option><option value="admin">Administrador</option></select></label></div>
       <div class="notice" id="modal-message">La contraseña temporal debe cambiarse después del primer inicio de sesión.</div>
       <footer class="modal-footer"><button class="button" type="button" data-action="close-modal">Cancelar</button><button class="button button-primary">Crear cuenta</button></footer></form>
   </section></div>`;
+}
+
+function userImportModal() {
+  return `<div class="modal-backdrop" data-action="dismiss-modal"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="user-import-title">
+    <header class="modal-header"><h2 id="user-import-title">Importar usuarios</h2><button class="text-button" data-action="close-modal" aria-label="Cerrar">✕</button></header>
+    <form id="user-import-form"><label class="field-label">Archivo Excel o CSV
+      <input class="field" id="user-import-file" name="file" type="file" accept=".xlsx,.xls,.csv" required></label>
+      <p class="subtle">La primera hoja debe tener las columnas nombre, usuario, correo y contraseña. La columna rol es opcional; si falta o queda vacía, se asigna «agent». Roles permitidos: agent, quality, supervisor, admin. Contraseña mínima: 10 caracteres.</p>
+      <p class="subtle">Usa contraseñas temporales y mantén el archivo protegido. Las claves no se muestran en el informe; se envían a Supabase para crear cada cuenta.</p>
+      <button class="button button-small" type="button" data-action="download-user-template">Descargar plantilla .xlsx</button>
+      <div class="notice" id="user-import-message" aria-live="polite">Selecciona un archivo para validarlo.</div>
+      <ol class="import-results" id="user-import-results" aria-live="polite"></ol>
+      <footer class="modal-footer"><button class="button" type="button" data-action="close-modal">Cancelar</button>
+        <button class="button button-primary" type="submit" disabled>Crear usuarios</button></footer></form>
+  </section></div>`;
+}
+
+function loadXlsx() {
+  if (!xlsxModulePromise) {
+    xlsxModulePromise = import("https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs")
+      .catch(error => {
+        xlsxModulePromise = null;
+        throw new Error(`No se pudo cargar el lector de Excel: ${error.message}`);
+      });
+  }
+  return xlsxModulePromise;
+}
+
+function normalizeImportHeader(value) {
+  return String(value ?? "").trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function renderUserImportResults(results) {
+  const list = document.querySelector("#user-import-results");
+  if (!list) return;
+  list.replaceChildren();
+  for (const result of results) {
+    const item = document.createElement("li");
+    item.textContent = `Fila ${result.rowNumber} (${result.username || "sin usuario"}): ${result.status} — ${result.message}`;
+    list.append(item);
+  }
+}
+
+async function prepareUserImport(form, file) {
+  userImportEntries = null;
+  userImportIssues = [];
+  renderUserImportResults([]);
+  const message = form.querySelector("#user-import-message");
+  const submit = form.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  if (!file) {
+    message.textContent = "Selecciona un archivo para validarlo.";
+    return;
+  }
+  if (file.size > 5 * 1024 * 1024) throw new Error("El archivo supera el límite de 5 MB.");
+
+  const XLSX = await loadXlsx();
+  if (!form.isConnected) return;
+  let workbook;
+  try {
+    const fileData = await file.arrayBuffer();
+    if (!form.isConnected) return;
+    workbook = XLSX.read(fileData, { type: "array", cellText: true, cellDates: false });
+  } catch {
+    throw new Error("No se pudo leer el archivo. Verifica que sea un Excel o CSV válido.");
+  }
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  if (!sheet) throw new Error("El archivo no contiene una hoja de cálculo.");
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "", blankrows: true });
+  if (rows.length < 2) throw new Error("La hoja debe incluir encabezados y al menos una fila de usuario.");
+
+  const aliases = {
+    full_name: ["nombre", "nombres", "nombrecompleto", "fullname"],
+    username: ["usuario", "username"],
+    email: ["correo", "correoelectronico", "email"],
+    password: ["contrasena", "clave", "password"],
+    role: ["rol", "role"]
+  };
+  const headers = rows[0].map(normalizeImportHeader);
+  const columns = Object.fromEntries(Object.entries(aliases).map(([field, names]) =>
+    [field, headers.findIndex(header => names.includes(header))]));
+  const required = ["full_name", "username", "email", "password"];
+  const missing = required.filter(field => columns[field] < 0);
+  if (missing.length) {
+    throw new Error(`Faltan columnas requeridas: ${missing.map(field => ({
+      full_name: "nombre", username: "usuario", email: "correo", password: "contraseña"
+    }[field])).join(", ")}.`);
+  }
+
+  const entries = [];
+  const issues = [];
+  const seenUsernames = new Set();
+  const seenEmails = new Set();
+  for (let index = 1; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (!row.some(value => String(value ?? "").trim())) continue;
+    const rowNumber = index + 1;
+    const full_name = String(row[columns.full_name] ?? "").trim();
+    const username = String(row[columns.username] ?? "").trim().toLowerCase();
+    const email = String(row[columns.email] ?? "").trim().toLowerCase();
+    const password = String(row[columns.password] ?? "");
+    const role = columns.role < 0 ? "agent" : String(row[columns.role] ?? "").trim().toLowerCase() || "agent";
+    const errors = [];
+    if (!full_name || full_name.length > 160) errors.push("nombre requerido (máximo 160 caracteres)");
+    if (!/^[a-z0-9][a-z0-9._-]{2,31}$/.test(username)) errors.push("usuario no válido");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.push("correo no válido");
+    if (password.length < 10) errors.push("contraseña debe tener al menos 10 caracteres");
+    if (!["admin", "supervisor", "agent", "quality"].includes(role)) errors.push("rol no válido");
+    if (seenUsernames.has(username)) errors.push("usuario duplicado en el archivo");
+    if (seenEmails.has(email)) errors.push("correo duplicado en el archivo");
+    if (errors.length) {
+      issues.push({ rowNumber, username, status: "No válido", message: errors.join("; ") });
+      continue;
+    }
+    seenUsernames.add(username);
+    seenEmails.add(email);
+    entries.push({ rowNumber, user: { full_name, username, email, password, role } });
+  }
+  if (!entries.length && !issues.length) throw new Error("No se encontraron filas de usuarios.");
+
+  userImportEntries = entries;
+  userImportIssues = issues;
+  renderUserImportResults(issues);
+  message.textContent = `${entries.length} usuario(s) válido(s); ${issues.length} fila(s) con errores. Las filas inválidas se omitirán.`;
+  message.className = issues.length ? "notice error" : "notice";
+  submit.disabled = entries.length === 0;
+}
+
+async function downloadUserTemplate() {
+  const XLSX = await loadXlsx();
+  const worksheet = XLSX.utils.aoa_to_sheet([["nombre", "usuario", "correo", "contraseña", "rol"]]);
+  worksheet["!cols"] = [{ wch: 24 }, { wch: 20 }, { wch: 30 }, { wch: 24 }, { wch: 16 }];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Usuarios");
+  XLSX.writeFile(workbook, "plantilla-usuarios.xlsx");
+}
+
+async function getUserCreationError(error, data) {
+  if (typeof data?.error === "string") return data.error;
+  if (error?.context && typeof error.context.clone === "function") {
+    try {
+      const body = await error.context.clone().json();
+      if (typeof body?.error === "string") return body.error;
+    } catch {
+      return error.message || "No se pudo crear.";
+    }
+  }
+  return error?.message || "No se pudo crear.";
+}
+
+async function createImportedUsers(form) {
+  const submit = form.querySelector('button[type="submit"]');
+  const fileInput = form.querySelector("#user-import-file");
+  const message = form.querySelector("#user-import-message");
+  if (!Array.isArray(userImportEntries)) throw new Error("Selecciona y valida un archivo antes de continuar.");
+  if (!userImportEntries.length) throw new Error("No hay filas válidas para crear.");
+  if (!window.confirm(`Se intentará crear ${userImportEntries.length} usuario(s). Las filas inválidas se omitirán. ¿Continuar?`)) return;
+
+  const entries = userImportEntries;
+  const total = entries.length;
+  const results = [...userImportIssues];
+  let created = 0;
+  form.dataset.busy = "true";
+  submit.disabled = true;
+  fileInput.disabled = true;
+  message.className = "notice";
+  try {
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      const payload = { ...entry.user };
+      message.textContent = `Creando usuario ${index + 1} de ${total}…`;
+      try {
+        const { data, error } = await client.functions.invoke("create-user", { body: payload });
+        if (error) throw new Error(await getUserCreationError(error, data));
+        if (data?.error) throw new Error(data.error);
+        created += 1;
+        results.push({ rowNumber: entry.rowNumber, username: entry.user.username, status: "Creado", message: "Cuenta creada correctamente." });
+      } catch (error) {
+        results.push({ rowNumber: entry.rowNumber, username: entry.user.username, status: "Error", message: error.message || "No se pudo crear." });
+      } finally {
+        payload.password = "";
+        entry.user.password = "";
+      }
+      renderUserImportResults(results.sort((first, second) => first.rowNumber - second.rowNumber));
+    }
+  } finally {
+    userImportEntries = null;
+    userImportIssues = [];
+    fileInput.value = "";
+    fileInput.disabled = false;
+    submit.disabled = true;
+    form.dataset.busy = "false";
+  }
+  const failed = total - created + results.filter(result => result.status === "No válido").length;
+  message.textContent = `Proceso terminado: ${created} creado(s), ${failed} con error.`;
+  message.className = failed ? "notice error" : "notice success";
+  toast(`${created} usuario(s) creado(s); ${failed} con error.`, failed ? "error" : "success");
+  await renderView();
 }
 
 function finishModal(callbackId) {
@@ -370,9 +696,23 @@ async function showNotificationList() {
     ${content || '<div class="empty-state">No tienes notificaciones.</div>'}</section></div>`);
 }
 
+function clearUserImportData() {
+  if (Array.isArray(userImportEntries)) {
+    for (const entry of userImportEntries) entry.user.password = "";
+  }
+  userImportEntries = null;
+  userImportIssues = [];
+}
+
 async function runAction(action, target) {
   const id = target.dataset.id;
   if (action === "logout") {
+    try {
+      await endSessionTracking("logout");
+    } catch (sessionError) {
+      console.error("No se pudo registrar la salida:", sessionError);
+      toast(`No se pudo guardar la hora de salida: ${sessionError.message}`, "error");
+    }
     const { error } = await client.auth.signOut();
     if (error) throw error;
     window.location.replace("login.html");
@@ -381,8 +721,21 @@ async function runAction(action, target) {
     agents = latestAgents;
     root.insertAdjacentHTML("beforeend", newCallbackModal());
   } else if (action === "close-modal") {
+    const modal = target.closest(".modal-backdrop");
+    const importForm = modal?.querySelector("#user-import-form");
+    if (importForm?.dataset.busy === "true") {
+      toast("Espera a que termine la importación.", "error");
+      return;
+    }
+    if (importForm) clearUserImportData();
     target.closest(".modal-backdrop")?.remove();
   } else if (action === "dismiss-modal" && target.classList.contains("modal-backdrop")) {
+    const importForm = target.querySelector("#user-import-form");
+    if (importForm?.dataset.busy === "true") {
+      toast("Espera a que termine la importación.", "error");
+      return;
+    }
+    if (importForm) clearUserImportData();
     target.remove();
   } else if (action === "start-call") {
     const { data: callback, error } = await client.from("callbacks").select("*").eq("id", id).single();
@@ -432,6 +785,11 @@ async function runAction(action, target) {
     await refreshNotifications();
   } else if (action === "new-user") {
     root.insertAdjacentHTML("beforeend", userModal());
+  } else if (action === "new-user-import") {
+    clearUserImportData();
+    root.insertAdjacentHTML("beforeend", userImportModal());
+  } else if (action === "download-user-template") {
+    await downloadUserTemplate();
   } else if (action === "add-break") {
     const selected = document.querySelector("#schedule-agent")?.value;
     if (!selected) throw new Error("Selecciona un agente para configurar su pausa.");
@@ -444,10 +802,19 @@ async function runAction(action, target) {
 }
 
 root?.addEventListener("click", async event => {
+  if (event.target.classList.contains("modal-backdrop")) {
+    try {
+      await runAction("dismiss-modal", event.target);
+    } catch (error) {
+      toast(error.message || "No se pudo cerrar el cuadro.", "error");
+    }
+    return;
+  }
   const target = event.target.closest("[data-action], [data-view]");
-  if (!target) return;
+  if (!target || target.dataset.action === "dismiss-modal") return;
   if (target.dataset.view) {
     event.preventDefault();
+    clearUserImportData();
     currentView = target.dataset.view;
     renderShell();
     await renderView();
@@ -519,6 +886,8 @@ root?.addEventListener("submit", async event => {
       form.closest(".modal-backdrop").remove();
       toast("Usuario creado.");
       await renderView();
+    } else if (form.id === "user-import-form") {
+      await createImportedUsers(form);
     } else if (form.matches(".schedule-form")) {
       if (!form.dataset.agent) throw new Error("Selecciona un agente.");
       const values = new FormData(form);
@@ -532,7 +901,7 @@ root?.addEventListener("submit", async event => {
       toast("Turno guardado.");
     }
   } catch (error) {
-    const notice = form.querySelector("#modal-message");
+    const notice = form.querySelector("#modal-message, #user-import-message");
     if (notice) {
       notice.textContent = error.message || "No se pudo completar la operación.";
       notice.className = "notice error";
@@ -544,6 +913,25 @@ root?.addEventListener("change", async event => {
   if (event.target.id === "schedule-agent") {
     selectedScheduleAgentId = event.target.value;
     await renderView();
+  } else if (event.target.id === "user-import-file") {
+    const form = event.target.form;
+    const message = form.querySelector("#user-import-message");
+    const submit = form.querySelector('button[type="submit"]');
+    event.target.disabled = true;
+    submit.disabled = true;
+    message.textContent = "Leyendo y validando el archivo…";
+    message.className = "notice";
+    try {
+      await prepareUserImport(form, event.target.files?.[0]);
+    } catch (error) {
+      userImportEntries = null;
+      userImportIssues = [];
+      renderUserImportResults([]);
+      message.textContent = error.message || "No se pudo validar el archivo.";
+      message.className = "notice error";
+    } finally {
+      event.target.disabled = false;
+    }
   }
 });
 
@@ -562,7 +950,7 @@ async function initialize() {
     const { data: userProfile, error: profileError } = await client.from("profiles")
       .select("id,full_name,email,role,role_label").eq("id", session.user.id).single();
     if (profileError) throw profileError;
-    if (!userProfile || !["admin", "supervisor", "agent"].includes(userProfile.role)) {
+    if (!userProfile || !["admin", "supervisor", "agent", "quality"].includes(userProfile.role)) {
       throw new Error("Tu cuenta no tiene un rol habilitado. Contacta al administrador.");
     }
     profile = userProfile;
@@ -570,6 +958,11 @@ async function initialize() {
     if (requiredRole && profile.role !== requiredRole) {
       window.location.replace(getRoleUrl(profile.role));
       return;
+    }
+    try {
+      await startSessionTracking();
+    } catch (sessionError) {
+      toast(`No se pudo iniciar el registro de tiempo: ${sessionError.message}`, "error");
     }
     renderShell();
     await renderView();
@@ -589,8 +982,14 @@ async function initialize() {
 }
 
 window.addEventListener("pagehide", () => {
+  clearUserImportData();
+  endSessionOnPageHide();
   if (realtimeChannel) client?.removeChannel(realtimeChannel);
   if (notificationsChannel) client?.removeChannel(notificationsChannel);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) updateSessionHeartbeat();
 });
 
 initialize();

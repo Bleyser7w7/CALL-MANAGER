@@ -25,7 +25,7 @@ export async function renderOverview(profile, filters = {}) {
     nextBreak = todaySchedule?.agent_breaks?.find(item =>
       Number(item.start_time.slice(0, 2)) * 60 + Number(item.start_time.slice(3, 5)) > currentMinutes
     );
-  } else {
+  } else if (profile.role !== "quality") {
     team = await fetchAgents();
   }
   const statuses = callbacks.reduce((total, row) => {
@@ -40,7 +40,7 @@ export async function renderOverview(profile, filters = {}) {
     ["Cumplidos", completed, `${completionRate}% de resolución`],
     ["Retrasados", statuses.overdue || 0, "Requieren atención"]
   ];
-  if (profile.role !== "agent") {
+  if (profile.role !== "agent" && profile.role !== "quality") {
     const available = team.filter(user => user.available_now).length;
     stats.push(["Agentes disponibles", available, "En turno y fuera de pausa"]);
     stats.push(["Fuera de turno", team.filter(user => user.role === "agent" && !user.on_shift).length, "Sin turno activo"]);

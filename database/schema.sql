@@ -6,9 +6,10 @@ create table if not exists public.profiles (
   username text not null unique constraint profiles_username_format_check
     check (username ~ '^[a-z0-9][a-z0-9._-]{2,31}$'),
   email text not null default '',
-  role text not null default 'agent' check (role in ('admin', 'supervisor', 'agent')),
+  role text not null default 'agent' check (role in ('admin', 'supervisor', 'agent', 'quality')),
   role_label text generated always as (
-    case role when 'admin' then 'Administrador' when 'supervisor' then 'Supervisor' else 'Agente' end
+    case role when 'admin' then 'Administrador' when 'supervisor' then 'Supervisor'
+      when 'quality' then 'Calidad' else 'Agente' end
   ) stored,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -22,6 +23,14 @@ set username = left(
 ) || '_' || substr(replace(id::text, '-', ''), 1, 7)
 where username is null;
 alter table public.profiles alter column username set not null;
+alter table public.profiles drop constraint if exists profiles_role_check;
+alter table public.profiles add constraint profiles_role_check
+  check (role in ('admin', 'supervisor', 'agent', 'quality'));
+alter table public.profiles drop column if exists role_label;
+alter table public.profiles add column role_label text generated always as (
+  case role when 'admin' then 'Administrador' when 'supervisor' then 'Supervisor'
+    when 'quality' then 'Calidad' else 'Agente' end
+) stored;
 create unique index if not exists profiles_username_lower_idx on public.profiles(lower(username));
 do $$
 begin
@@ -434,6 +443,73 @@ begin
 end;
 $$;
 
+create table if not exists public.user_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  client_session_id uuid not null,
+  started_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  ended_at timestamptz,
+  end_reason text not null default '' check (end_reason in ('', 'logout', 'pagehide', 'inactive')),
+  check (ended_at is null or ended_at >= started_at)
+);
+create unique index if not exists user_sessions_one_open_per_client_idx
+  on public.user_sessions(user_id, client_session_id) where ended_at is null;
+create index if not exists user_sessions_user_started_idx
+  on public.user_sessions(user_id, started_at desc);
+
+create or replace function public.start_user_session(p_client_session_id uuid)
+returns uuid language plpgsql security definer set search_path = public
+as $$
+declare
+  v_user_id uuid := auth.uid();
+  v_session_id uuid;
+begin
+  if v_user_id is null or p_client_session_id is null then
+    raise exception 'Se requiere una sesión autenticada.';
+  end if;
+  update public.user_sessions
+  set ended_at = last_seen_at, end_reason = 'inactive'
+  where user_id = v_user_id and client_session_id = p_client_session_id
+    and ended_at is null and last_seen_at < now() - interval '3 minutes';
+  insert into public.user_sessions(user_id, client_session_id)
+  values (v_user_id, p_client_session_id)
+  on conflict (user_id, client_session_id) where ended_at is null
+  do update set last_seen_at = now()
+  returning id into v_session_id;
+  return v_session_id;
+end;
+$$;
+
+create or replace function public.heartbeat_user_session(p_client_session_id uuid)
+returns void language plpgsql security definer set search_path = public
+as $$
+begin
+  if auth.uid() is null or p_client_session_id is null then
+    raise exception 'Se requiere una sesión autenticada.';
+  end if;
+  update public.user_sessions set last_seen_at = now()
+  where user_id = auth.uid() and client_session_id = p_client_session_id and ended_at is null;
+  if not found then raise exception 'La sesión registrada ya no está activa.'; end if;
+end;
+$$;
+
+create or replace function public.end_user_session(p_client_session_id uuid, p_reason text)
+returns void language plpgsql security definer set search_path = public
+as $$
+begin
+  if auth.uid() is null or p_client_session_id is null then
+    raise exception 'Se requiere una sesión autenticada.';
+  end if;
+  if p_reason not in ('logout', 'pagehide') then
+    raise exception 'El motivo de cierre no es válido.';
+  end if;
+  update public.user_sessions
+  set ended_at = greatest(now(), started_at), last_seen_at = greatest(now(), started_at), end_reason = p_reason
+  where user_id = auth.uid() and client_session_id = p_client_session_id and ended_at is null;
+end;
+$$;
+
 alter table public.profiles enable row level security;
 alter table public.agents enable row level security;
 alter table public.supervisors enable row level security;
@@ -445,4 +521,5 @@ alter table public.agent_breaks enable row level security;
 alter table public.notifications enable row level security;
 alter table public.activity_logs enable row level security;
 alter table public.system_settings enable row level security;
+alter table public.user_sessions enable row level security;
 

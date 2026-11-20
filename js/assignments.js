@@ -6,7 +6,7 @@ export async function fetchAgents() {
   const client = requireSupabase();
   const { data, error } = await client.from("profiles")
     .select("id,full_name,username,email,role,role_label")
-    .in("role", ["admin", "agent", "supervisor"]).order("full_name");
+    .in("role", ["admin", "agent", "supervisor", "quality"]).order("full_name");
   if (error) throw error;
   const agentIds = (data || []).filter(user => user.role === "agent").map(user => user.id);
   if (!agentIds.length) return data || [];

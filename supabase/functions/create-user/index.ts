@@ -35,7 +35,7 @@ Deno.serve(async request => {
     const role = body.role;
     if (!fullName || fullName.length > 160 || !/^[a-z0-9][a-z0-9._-]{2,31}$/.test(username) ||
       !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
-      password.length < 10 || !["admin", "supervisor", "agent"].includes(role)) {
+      password.length < 10 || !["admin", "supervisor", "agent", "quality"].includes(role)) {
       throw new Error("Nombre, usuario, correo, rol o contraseña no válidos.");
     }
     const { data: created, error: createError } = await adminClient.auth.admin.createUser({

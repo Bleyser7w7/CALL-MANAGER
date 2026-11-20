@@ -9,7 +9,11 @@
   <script type="module" src="js/auth.js"></script>
 </head>
 <body class="login-page">
-  <main class="login-card">
+  <div class="login-layout">
+    <section class="login-message" aria-label="Mensaje motivador">
+      <p>No abandones<br><span>tus sueños</span></p>
+    </section>
+    <main class="login-card">
     <a class="brand" href="login.html"><span class="brand-mark">C</span><span>CALLBACK<span class="brand-light">MANAGER</span></span></a>
     <p class="eyebrow">CENTRO DE OPERACIONES</p>
     <h1>Bienvenido</h1>
@@ -32,6 +36,8 @@
     </form>
     <p class="notice" id="auth-message" role="status"></p>
     <p class="setup-note">Configura primero las variables públicas de Supabase en <code>js/config.js</code>.</p>
-  </main>
+    </main>
+  </div>
+  <footer class="login-footer">© Bleyser7w7 (2026). All rights reserved</footer>
 </body>
 </html>
